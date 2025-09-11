@@ -13,11 +13,11 @@ dotenv.config();
 
 const PORT = process.env.PORT || 5000;
 const MONGO_URI =
-  process.env.MONGO_URL;
-const JWT_SECRET = process.env.JWT_SECRET;
+  process.env.MONGO_URL ;
+const JWT_SECRET = process.env.JWT_SECRET ;
 const NODEMAILER_EMAIL = process.env.NODEMAILER_EMAIL;
 const NODEMAILER_PASS =
-  process.env.NODEMAILER_PASS;
+  process.env.NODEMAILER_PASS ;
 
 mongoose
   .connect(MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
@@ -245,6 +245,31 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
+const ensureOtpVerified = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user.id).select("status");
+    if (!user || user.status !== "completed") {
+      await Log.create({
+        action: "access_denied",
+        user: req.user.id,
+        details: { reason: "OTP verification incomplete" },
+      });
+      return res
+        .status(403)
+        .json({ error: "Please complete OTP verification" });
+    }
+    next();
+  } catch (error) {
+    console.error("OTP Verification Check Error:", error);
+    await Log.create({
+      action: "otp_verification_check_error",
+      user: req.user.id,
+      details: { error: error.message },
+    });
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
 const sanitizeInput = (input) => {
   if (typeof input === "string") {
     return sanitize(input, { allowedTags: [], allowedAttributes: {} });
@@ -446,7 +471,6 @@ app.post("/api/complete-registration", sanitizeBody, async (req, res) => {
     user.registrationNumber =
       userType === "hospital" ? registrationNumber : undefined;
     user.consentGDPR = agreeTerms;
-    user.kycVerified = true;
     user.status = "completed";
     user.otp = undefined;
     user.otpExpiry = undefined;
@@ -474,6 +498,7 @@ app.post("/api/complete-registration", sanitizeBody, async (req, res) => {
         email: user.email,
         firstName,
         lastName,
+        kycVerified: user.kycVerified,
       },
     });
   } catch (error) {
@@ -495,7 +520,7 @@ app.post("/api/login", sanitizeBody, async (req, res) => {
         action: "login_failed",
         details: { email, reason: "Missing fields" },
       });
-      return res.status(400).json({ error: "Please fill in all fields" });
+      return res.status(401).json({ error: "Please fill in all fields" });
     }
 
     const user = await User.findOne({ email });
@@ -516,12 +541,14 @@ app.post("/api/login", sanitizeBody, async (req, res) => {
       return res.status(401).json({ error: "Invalid credentials" });
     }
 
-    if (!user.kycVerified || user.status !== "completed") {
+    if (user.status !== "completed") {
       await Log.create({
         action: "login_failed",
-        details: { email, reason: "Account not fully registered" },
+        details: { email, reason: "OTP verification incomplete" },
       });
-      return res.status(403).json({ error: "Account not fully registered" });
+      return res
+        .status(403)
+        .json({ error: "Please complete OTP verification" });
     }
 
     const token = jwt.sign(
@@ -546,6 +573,7 @@ app.post("/api/login", sanitizeBody, async (req, res) => {
         email: user.email,
         firstName: user.firstName,
         lastName: user.lastName,
+        kycVerified: user.kycVerified,
       },
     });
   } catch (error) {
@@ -685,7 +713,7 @@ app.post("/api/reset-password", sanitizeBody, async (req, res) => {
 app.get("/api/user/profile", authenticateToken, async (req, res) => {
   try {
     const user = await User.findById(req.user.id).select(
-      "firstName lastName email kycVerified certificates userType status"
+      "firstName lastName email kycVerified certificates userType status profilePicture"
     );
     if (!user) {
       await Log.create({
@@ -695,16 +723,6 @@ app.get("/api/user/profile", authenticateToken, async (req, res) => {
       });
       return res.status(404).json({ error: "User not found" });
     }
-    if (user.status !== "completed") {
-      await Log.create({
-        action: "profile_fetch_failed",
-        user: req.user.id,
-        details: { reason: "User registration incomplete" },
-      });
-      return res
-        .status(403)
-        .json({ error: "Please complete your registration" });
-    }
     res.json({
       firstName: user.firstName || "",
       lastName: user.lastName || "",
@@ -712,6 +730,8 @@ app.get("/api/user/profile", authenticateToken, async (req, res) => {
       kycVerified: user.kycVerified,
       certificates: user.certificates || [],
       userType: user.userType,
+      status: user.status,
+      profilePicture: user.profilePicture || "",
     });
   } catch (error) {
     console.error("Profile Fetch Error:", error);
@@ -725,151 +745,171 @@ app.get("/api/user/profile", authenticateToken, async (req, res) => {
 });
 
 // User Stats Route
-app.get("/api/user/stats", authenticateToken, async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const donations = await Donation.countDocuments({ donor: userId });
-    const requests = await Request.countDocuments({ requester: userId });
-    const completedTransactions = await Donation.countDocuments({
-      donor: userId,
-      status: "received",
-    });
-    const activeRequests = await Request.countDocuments({
-      requester: userId,
-      status: { $in: ["pending", "approved", "dispatched"] },
-    });
-    const livesHelped = await Donation.aggregate([
-      {
-        $match: {
-          donor: new mongoose.Types.ObjectId(userId),
-          status: "received",
+app.get(
+  "/api/user/stats",
+  authenticateToken,
+  ensureOtpVerified,
+  async (req, res) => {
+    try {
+      const userId = req.user.id;
+      const donations = await Donation.countDocuments({ donor: userId });
+      const requests = await Request.countDocuments({ requester: userId });
+      const completedTransactions = await Donation.countDocuments({
+        donor: userId,
+        status: "received",
+      });
+      const activeRequests = await Request.countDocuments({
+        requester: userId,
+        status: { $in: ["pending", "approved", "dispatched"] },
+      });
+      const livesHelped = await Donation.aggregate([
+        {
+          $match: {
+            donor: new mongoose.Types.ObjectId(userId),
+            status: "received",
+          },
         },
-      },
-      { $group: { _id: null, totalImpact: { $sum: "$impact" } } },
-    ]);
+        { $group: { _id: null, totalImpact: { $sum: "$impact" } } },
+      ]);
 
-    const trustScore = 95; // Placeholder
-    const impactScore =
-      Math.min(Math.round(livesHelped[0]?.totalImpact / 10) || 0, 100) + "%";
+      const trustScore = 95; // Placeholder
+      const impactScore =
+        Math.min(Math.round(livesHelped[0]?.totalImpact / 10) || 0, 100) + "%";
 
-    res.json({
-      totalDonations: donations,
-      activeRequests,
-      completedTransactions,
-      impactScore,
-      livesHelped: livesHelped[0]?.totalImpact || 0,
-      trustScore: `${trustScore}%`,
-      donationChange: "+0%",
-      requestChange: "+0%",
-      transactionChange: "+0%",
-      impactChange: "+0%",
-    });
-  } catch (error) {
-    console.error("Stats Fetch Error:", error);
-    await Log.create({
-      action: "stats_fetch_error",
-      user: req.user.id,
-      details: { error: error.message },
-    });
-    res.status(500).json({ error: "Server error" });
+      res.json({
+        totalDonations: donations,
+        activeRequests,
+        completedTransactions,
+        impactScore,
+        livesHelped: livesHelped[0]?.totalImpact || 0,
+        trustScore: `${trustScore}%`,
+        donationChange: "+0%",
+        requestChange: "+0%",
+        transactionChange: "+0%",
+        impactChange: "+0%",
+      });
+    } catch (error) {
+      console.error("Stats Fetch Error:", error);
+      await Log.create({
+        action: "stats_fetch_error",
+        user: req.user.id,
+        details: { error: error.message },
+      });
+      res.status(500).json({ error: "Server error" });
+    }
   }
-});
+);
 
 // User Requests Route
-app.get("/api/user/requests", authenticateToken, async (req, res) => {
-  try {
-    const requests = await Request.find({ requester: req.user.id })
-      .populate("medicine", "name")
-      .lean();
-    const formattedRequests = requests.map((req) => ({
-      id: req._id.toString(),
-      medicine: req.medicine?.name || "Unknown Medicine",
-      quantity: req.quantity,
-      status: req.status,
-      date: req.createdAt,
-      priority: req.priority,
-    }));
-    res.json(formattedRequests);
-  } catch (error) {
-    console.error("Requests Fetch Error:", error);
-    await Log.create({
-      action: "requests_fetch_error",
-      user: req.user.id,
-      details: { error: error.message },
-    });
-    res.status(500).json({ error: "Server error" });
+app.get(
+  "/api/user/requests",
+  authenticateToken,
+  ensureOtpVerified,
+  async (req, res) => {
+    try {
+      const requests = await Request.find({ requester: req.user.id })
+        .populate("medicine", "name")
+        .lean();
+      const formattedRequests = requests.map((req) => ({
+        id: req._id.toString(),
+        medicine: req.medicine?.name || "Unknown Medicine",
+        quantity: req.quantity,
+        status: req.status,
+        date: req.createdAt,
+        priority: req.priority,
+      }));
+      res.json(formattedRequests);
+    } catch (error) {
+      console.error("Requests Fetch Error:", error);
+      await Log.create({
+        action: "requests_fetch_error",
+        user: req.user.id,
+        details: { error: error.message },
+      });
+      res.status(500).json({ error: "Server error" });
+    }
   }
-});
+);
 
 // User Donations Route
-app.get("/api/user/donations", authenticateToken, async (req, res) => {
-  try {
-    const donations = await Donation.find({ donor: req.user.id })
-      .populate("medicine", "name")
-      .populate("recipient", "firstName lastName")
-      .lean();
-    const formattedDonations = donations.map((don) => ({
-      id: don._id.toString(),
-      medicine: don.medicine?.name || "Unknown Medicine",
-      quantity: don.quantity || "N/A",
-      date: don.createdAt,
-      recipient: don.recipient
-        ? `${don.recipient.firstName || ""} ${
-            don.recipient.lastName || ""
-          }`.trim() || don.recipient.email
-        : don.recipientType === "Hospital"
-        ? "Hospital Recipient"
-        : "N/A",
-      impact: don.impact,
-    }));
-    res.json(formattedDonations);
-  } catch (error) {
-    console.error("Donations Fetch Error:", error);
-    await Log.create({
-      action: "donations_fetch_error",
-      user: req.user.id,
-      details: { error: error.message },
-    });
-    res.status(500).json({ error: "Server error" });
+app.get(
+  "/api/user/donations",
+  authenticateToken,
+  ensureOtpVerified,
+  async (req, res) => {
+    try {
+      const donations = await Donation.find({ donor: req.user.id })
+        .populate("medicine", "name")
+        .populate("recipient", "firstName lastName email")
+        .lean();
+      const formattedDonations = donations.map((don) => ({
+        id: don._id.toString(),
+        medicine: don.medicine?.name || "Unknown Medicine",
+        quantity: don.quantity || "N/A",
+        date: don.createdAt,
+        recipient: don.recipient
+          ? `${don.recipient.firstName || ""} ${
+              don.recipient.lastName || ""
+            }`.trim() || don.recipient.email
+          : don.recipientType === "Hospital"
+          ? "Hospital Recipient"
+          : "N/A",
+        impact: don.impact,
+      }));
+      res.json(formattedDonations);
+    } catch (error) {
+      console.error("Donations Fetch Error:", error);
+      await Log.create({
+        action: "donations_fetch_error",
+        user: req.user.id,
+        details: { error: error.message },
+      });
+      res.status(500).json({ error: "Server error" });
+    }
   }
-});
+);
 
 // User Notifications Route
-app.get("/api/user/notifications", authenticateToken, async (req, res) => {
-  try {
-    const user = await User.findById(req.user.id).select("notifications");
-    if (!user) {
+app.get(
+  "/api/user/notifications",
+  authenticateToken,
+  ensureOtpVerified,
+  async (req, res) => {
+    try {
+      const user = await User.findById(req.user.id).select("notifications");
+      if (!user) {
+        await Log.create({
+          action: "notifications_fetch_failed",
+          user: req.user.id,
+          details: { reason: "User not found" },
+        });
+        return res.status(404).json({ error: "User not found" });
+      }
+      const formattedNotifications = user.notifications.map((notif, index) => ({
+        type:
+          notif.type ||
+          (index % 3 === 0 ? "success" : index % 3 === 1 ? "info" : "warning"),
+        title:
+          notif.type === "success"
+            ? "Request Approved"
+            : notif.type === "info"
+            ? "Donation Received"
+            : "New Medicine Available",
+        message: notif.message || "Notification details",
+        time: new Date(notif.createdAt).toLocaleTimeString(),
+      }));
+      res.json(formattedNotifications);
+    } catch (error) {
+      console.error("Notifications Fetch Error:", error);
       await Log.create({
-        action: "notifications_fetch_failed",
+        action: "notifications_fetch_error",
         user: req.user.id,
-        details: { reason: "User not found" },
+        details: { error: error.message },
       });
-      return res.status(404).json({ error: "User not found" });
+      res.status(500).json({ error: "Server error" });
     }
-    const formattedNotifications = user.notifications.map((notif, index) => ({
-      type:
-        notif.type ||
-        (index % 3 === 0 ? "success" : index % 3 === 1 ? "info" : "warning"),
-      title:
-        notif.type === "success"
-          ? "Request Approved"
-          : notif.type === "info"
-          ? "Donation Received"
-          : "New Medicine Available",
-      message: notif.message || "Notification details",
-      time: new Date(notif.createdAt).toLocaleTimeString(),
-    }));
-    res.json(formattedNotifications);
-  } catch (error) {
-    console.error("Notifications Fetch Error:", error);
-    await Log.create({
-      action: "notifications_fetch_error",
-      user: req.user.id,
-      details: { error: error.message },
-    });
-    res.status(500).json({ error: "Server error" });
   }
-});
+);
 
 // Available Medicines Route (Public)
 app.get("/api/medicines/available", async (req, res) => {
@@ -892,8 +932,6 @@ app.get("/api/medicines/available", async (req, res) => {
   }
 });
 
-
-//starting server with satyam 007
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
