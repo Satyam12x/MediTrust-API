@@ -11,32 +11,26 @@ const sanitize = require("sanitize-html");
 
 dotenv.config();
 
+// Environment variables
 const PORT = process.env.PORT || 5000;
-const MONGO_URI =
-  process.env.MONGO_URL ;
-const JWT_SECRET = process.env.JWT_SECRET ;
-const NODEMAILER_EMAIL = process.env.NODEMAILER_EMAIL;
-const NODEMAILER_PASS =
-  process.env.NODEMAILER_PASS ;
+const MONGO_URI = process.env.MONGO_URL || "mongodb://localhost:27017/meditrust";
+const JWT_SECRET = process.env.JWT_SECRET || "your_jwt_secret_key_12345";
+const NODEMAILER_EMAIL = process.env.NODEMAILER_EMAIL || "your_email@gmail.com";
+const NODEMAILER_PASS = process.env.NODEMAILER_PASS || "your_app_specific_password";
 
+// MongoDB connection
 mongoose
   .connect(MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
   .then(() => console.log("MongoDB Connected"))
   .catch((err) => console.error("MongoDB Connection Error:", err));
 
-// Schemas
+// User Schema
 const userSchema = new mongoose.Schema(
   {
     firstName: { type: String, trim: true, default: "" },
     lastName: { type: String, trim: true, default: "" },
     age: { type: Number, min: 18 },
-    email: {
-      type: String,
-      required: true,
-      unique: true,
-      lowercase: true,
-      trim: true,
-    },
+    email: { type: String, required: true, unique: true, lowercase: true, trim: true },
     password: { type: String, required: true, minlength: 6 },
     userType: { type: String, enum: ["donor", "patient", "hospital"] },
     registrationNumber: { type: String, trim: true },
@@ -46,27 +40,18 @@ const userSchema = new mongoose.Schema(
     location: { type: String, trim: true },
     phone: { type: String, trim: true },
     consentGDPR: { type: Boolean, default: false },
-    donationHistory: [
-      { type: mongoose.Schema.Types.ObjectId, ref: "Donation" },
-    ],
+    donationHistory: [{ type: mongoose.Schema.Types.ObjectId, ref: "Donation" }],
     requestHistory: [{ type: mongoose.Schema.Types.ObjectId, ref: "Request" }],
-    certificates: [
-      { certificateId: String, blockchainHash: String, url: String },
-    ],
+    certificates: [{ certificateId: String, blockchainHash: String, url: String }],
     incentives: { type: Number, default: 0 },
-    notifications: [
-      { type: String, message: String, read: Boolean, createdAt: Date },
-    ],
+    notifications: [{ type: String, message: String, read: Boolean, createdAt: Date }],
     fraudScore: { type: Number, default: 0, min: 0 },
     isSuspended: { type: Boolean, default: false },
     rememberMe: { type: Boolean, default: false },
-    status: {
-      type: String,
-      enum: ["pending", "completed"],
-      default: "pending",
-    },
+    status: { type: String, enum: ["pending", "completed"], default: "pending" },
     otp: { type: String },
     otpExpiry: { type: Date },
+    tempEmail: { type: String }, // Temporary field for email update
     createdAt: { type: Date, default: Date.now },
     updatedAt: { type: Date, default: Date.now },
   },
@@ -75,6 +60,7 @@ const userSchema = new mongoose.Schema(
 
 userSchema.index({ email: 1 });
 
+// Medicine Schema
 const medicineSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, trim: true },
@@ -98,19 +84,12 @@ const medicineSchema = new mongoose.Schema(
 
 medicineSchema.index({ batchNo: 1 });
 
+// Request Schema
 const requestSchema = new mongoose.Schema(
   {
-    requester: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
-      required: true,
-    },
+    requester: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
     requesterType: { type: String, enum: ["User"], required: true },
-    medicine: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Medicine",
-      required: true,
-    },
+    medicine: { type: mongoose.Schema.Types.ObjectId, ref: "Medicine", required: true },
     quantity: { type: String, required: true },
     status: {
       type: String,
@@ -121,11 +100,7 @@ const requestSchema = new mongoose.Schema(
     gpsLocation: { type: String, trim: true },
     blockchainHash: { type: String },
     prescriptionUpload: { type: String },
-    priority: {
-      type: String,
-      enum: ["low", "medium", "high"],
-      default: "medium",
-    },
+    priority: { type: String, enum: ["low", "medium", "high"], default: "medium" },
     createdAt: { type: Date, default: Date.now },
     updatedAt: { type: Date, default: Date.now },
   },
@@ -134,19 +109,12 @@ const requestSchema = new mongoose.Schema(
 
 requestSchema.index({ requester: 1, medicine: 1 });
 
+// Donation Schema
 const donationSchema = new mongoose.Schema(
   {
-    donor: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
-      required: true,
-    },
+    donor: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
     donorType: { type: String, enum: ["User", "Hospital"], required: true },
-    medicine: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Medicine",
-      required: true,
-    },
+    medicine: { type: mongoose.Schema.Types.ObjectId, ref: "Medicine", required: true },
     recipient: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     recipientType: { type: String, enum: ["User", "Hospital"] },
     status: {
@@ -167,6 +135,7 @@ const donationSchema = new mongoose.Schema(
 
 donationSchema.index({ donor: 1, medicine: 1 });
 
+// Log Schema
 const logSchema = new mongoose.Schema(
   {
     action: { type: String, required: true },
@@ -180,14 +149,15 @@ const logSchema = new mongoose.Schema(
 
 logSchema.index({ createdAt: -1 });
 
+// Models
 const User = mongoose.model("User", userSchema);
 const Medicine = mongoose.model("Medicine", medicineSchema);
 const Request = mongoose.model("Request", requestSchema);
 const Donation = mongoose.model("Donation", donationSchema);
 const Log = mongoose.model("Log", logSchema);
 
+// CORS configuration
 const allowedOrigins = ["http://localhost:3000", "http://localhost:5173"];
-
 const corsOptions = {
   origin: (origin, callback) => {
     if (!origin || allowedOrigins.includes(origin)) {
@@ -201,6 +171,7 @@ const corsOptions = {
   allowedHeaders: ["Content-Type", "Authorization"],
 };
 
+// Express app setup
 const app = express();
 app.use(helmet());
 app.use(cors(corsOptions));
@@ -219,8 +190,8 @@ const transporter = nodemailer.createTransport({
   auth: { user: NODEMAILER_EMAIL, pass: NODEMAILER_PASS },
 });
 
-const generateOTP = () =>
-  Math.floor(100000 + Math.random() * 900000).toString();
+// Utility functions
+const generateOTP = () => Math.floor(100000 + Math.random() * 900000).toString();
 
 const sendEmail = async (to, subject, text) => {
   try {
@@ -254,9 +225,7 @@ const ensureOtpVerified = async (req, res, next) => {
         user: req.user.id,
         details: { reason: "OTP verification incomplete" },
       });
-      return res
-        .status(403)
-        .json({ error: "Please complete OTP verification" });
+      return res.status(403).json({ error: "Please complete OTP verification" });
     }
     next();
   } catch (error) {
@@ -286,6 +255,7 @@ const sanitizeBody = (req, res, next) => {
   next();
 };
 
+// Routes
 // Signup Route
 app.post("/api/signup", sanitizeBody, async (req, res) => {
   try {
@@ -296,29 +266,21 @@ app.post("/api/signup", sanitizeBody, async (req, res) => {
         action: "signup_failed",
         details: { email, reason: "Missing required fields" },
       });
-      return res
-        .status(400)
-        .json({
-          error: "Please provide email, password, and confirm password",
-        });
+      return res.status(400).json({ error: "Please provide email, password, and confirm password" });
     }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       await Log.create({
         action: "signup_failed",
         details: { email, reason: "Invalid email format" },
       });
-      return res
-        .status(400)
-        .json({ error: "Please enter a valid email address" });
+      return res.status(400).json({ error: "Please enter a valid email address" });
     }
     if (password.length < 6) {
       await Log.create({
         action: "signup_failed",
         details: { email, reason: "Password too short" },
       });
-      return res
-        .status(400)
-        .json({ error: "Password must be at least 6 characters long" });
+      return res.status(400).json({ error: "Password must be at least 6 characters long" });
     }
     if (password !== confirmPassword) {
       await Log.create({
@@ -383,46 +345,28 @@ app.post("/api/signup", sanitizeBody, async (req, res) => {
 // Complete Registration Route
 app.post("/api/complete-registration", sanitizeBody, async (req, res) => {
   try {
-    const {
-      email,
-      otp,
-      firstName,
-      lastName,
-      age,
-      userType,
-      agreeTerms,
-      registrationNumber,
-    } = req.body;
+    const { email, otp, firstName, lastName, age, userType, agreeTerms, registrationNumber } = req.body;
 
     if (!email || !otp || !/^\d{6}$/.test(otp)) {
       await Log.create({
         action: "complete_registration_failed",
         details: { email, reason: "Invalid email or OTP format" },
       });
-      return res
-        .status(400)
-        .json({ error: "Please provide a valid email and 6-digit OTP" });
+      return res.status(400).json({ error: "Please provide a valid email and 6-digit OTP" });
     }
     if (!firstName || !lastName || !age || !userType || !agreeTerms) {
       await Log.create({
         action: "complete_registration_failed",
         details: { email, reason: "Missing required fields" },
       });
-      return res
-        .status(400)
-        .json({
-          error:
-            "Please provide first name, last name, age, user type, and agree to terms",
-        });
+      return res.status(400).json({ error: "Please provide first name, last name, age, user type, and agree to terms" });
     }
     if (age < 18) {
       await Log.create({
         action: "complete_registration_failed",
         details: { email, reason: "Underage" },
       });
-      return res
-        .status(400)
-        .json({ error: "You must be at least 18 years old" });
+      return res.status(400).json({ error: "You must be at least 18 years old" });
     }
     if (!["donor", "patient", "hospital"].includes(userType)) {
       await Log.create({
@@ -436,9 +380,7 @@ app.post("/api/complete-registration", sanitizeBody, async (req, res) => {
         action: "complete_registration_failed",
         details: { email, reason: "Missing registration number for hospital" },
       });
-      return res
-        .status(400)
-        .json({ error: "Registration number is required for hospitals" });
+      return res.status(400).json({ error: "Registration number is required for hospitals" });
     }
     if (!agreeTerms) {
       await Log.create({
@@ -468,21 +410,16 @@ app.post("/api/complete-registration", sanitizeBody, async (req, res) => {
     user.lastName = lastName;
     user.age = age;
     user.userType = userType;
-    user.registrationNumber =
-      userType === "hospital" ? registrationNumber : undefined;
+    user.registrationNumber = userType === "hospital" ? registrationNumber : undefined;
     user.consentGDPR = agreeTerms;
     user.status = "completed";
     user.otp = undefined;
     user.otpExpiry = undefined;
     await user.save();
 
-    const token = jwt.sign(
-      { id: user._id, userType: user.userType },
-      JWT_SECRET,
-      {
-        expiresIn: "1h",
-      }
-    );
+    const token = jwt.sign({ id: user._id, userType: user.userType }, JWT_SECRET, {
+      expiresIn: "1h",
+    });
 
     await Log.create({
       action: "complete_registration_success",
@@ -492,14 +429,7 @@ app.post("/api/complete-registration", sanitizeBody, async (req, res) => {
     res.json({
       message: "Registration completed successfully",
       token,
-      user: {
-        id: user._id,
-        userType: user.userType,
-        email: user.email,
-        firstName,
-        lastName,
-        kycVerified: user.kycVerified,
-      },
+      user: { id: user._id, userType: user.userType, email: user.email, firstName, lastName, kycVerified: user.kycVerified },
     });
   } catch (error) {
     console.error("Complete Registration Error:", error);
@@ -520,7 +450,7 @@ app.post("/api/login", sanitizeBody, async (req, res) => {
         action: "login_failed",
         details: { email, reason: "Missing fields" },
       });
-      return res.status(401).json({ error: "Please fill in all fields" });
+      return res.status(400).json({ error: "Please fill in all fields" });
     }
 
     const user = await User.findOne({ email });
@@ -546,18 +476,12 @@ app.post("/api/login", sanitizeBody, async (req, res) => {
         action: "login_failed",
         details: { email, reason: "OTP verification incomplete" },
       });
-      return res
-        .status(403)
-        .json({ error: "Please complete OTP verification" });
+      return res.status(403).json({ error: "Please complete OTP verification" });
     }
 
-    const token = jwt.sign(
-      { id: user._id, userType: user.userType },
-      JWT_SECRET,
-      {
-        expiresIn: rememberMe ? "7d" : "1h",
-      }
-    );
+    const token = jwt.sign({ id: user._id, userType: user.userType }, JWT_SECRET, {
+      expiresIn: rememberMe ? "7d" : "1h",
+    });
 
     await User.findByIdAndUpdate(user._id, { rememberMe });
     await Log.create({
@@ -648,27 +572,21 @@ app.post("/api/reset-password", sanitizeBody, async (req, res) => {
         action: "reset_password_failed",
         details: { email, reason: "Missing fields" },
       });
-      return res
-        .status(400)
-        .json({ error: "Please provide all required fields" });
+      return res.status(400).json({ error: "Please provide all required fields" });
     }
     if (!/^\d{6}$/.test(otp)) {
       await Log.create({
         action: "reset_password_failed",
         details: { email, reason: "Invalid OTP format" },
       });
-      return res
-        .status(400)
-        .json({ error: "Please provide a valid 6-digit OTP" });
+      return res.status(400).json({ error: "Please provide a valid 6-digit OTP" });
     }
     if (newPassword.length < 6) {
       await Log.create({
         action: "reset_password_failed",
         details: { email, reason: "Password too short" },
       });
-      return res
-        .status(400)
-        .json({ error: "Password must be at least 6 characters long" });
+      return res.status(400).json({ error: "Password must be at least 6 characters long" });
     }
     if (newPassword !== confirmPassword) {
       await Log.create({
@@ -713,7 +631,7 @@ app.post("/api/reset-password", sanitizeBody, async (req, res) => {
 app.get("/api/user/profile", authenticateToken, async (req, res) => {
   try {
     const user = await User.findById(req.user.id).select(
-      "firstName lastName email kycVerified certificates userType status profilePicture"
+      "firstName lastName email phone kycVerified certificates userType status profilePicture"
     );
     if (!user) {
       await Log.create({
@@ -727,6 +645,7 @@ app.get("/api/user/profile", authenticateToken, async (req, res) => {
       firstName: user.firstName || "",
       lastName: user.lastName || "",
       email: user.email,
+      phone: user.phone || "",
       kycVerified: user.kycVerified,
       certificates: user.certificates || [],
       userType: user.userType,
@@ -744,180 +663,321 @@ app.get("/api/user/profile", authenticateToken, async (req, res) => {
   }
 });
 
-// User Stats Route
-app.get(
-  "/api/user/stats",
-  authenticateToken,
-  ensureOtpVerified,
-  async (req, res) => {
-    try {
-      const userId = req.user.id;
-      const donations = await Donation.countDocuments({ donor: userId });
-      const requests = await Request.countDocuments({ requester: userId });
-      const completedTransactions = await Donation.countDocuments({
-        donor: userId,
-        status: "received",
-      });
-      const activeRequests = await Request.countDocuments({
-        requester: userId,
-        status: { $in: ["pending", "approved", "dispatched"] },
-      });
-      const livesHelped = await Donation.aggregate([
-        {
-          $match: {
-            donor: new mongoose.Types.ObjectId(userId),
-            status: "received",
-          },
-        },
-        { $group: { _id: null, totalImpact: { $sum: "$impact" } } },
-      ]);
-
-      const trustScore = 95; // Placeholder
-      const impactScore =
-        Math.min(Math.round(livesHelped[0]?.totalImpact / 10) || 0, 100) + "%";
-
-      res.json({
-        totalDonations: donations,
-        activeRequests,
-        completedTransactions,
-        impactScore,
-        livesHelped: livesHelped[0]?.totalImpact || 0,
-        trustScore: `${trustScore}%`,
-        donationChange: "+0%",
-        requestChange: "+0%",
-        transactionChange: "+0%",
-        impactChange: "+0%",
-      });
-    } catch (error) {
-      console.error("Stats Fetch Error:", error);
+// Update Email - Send OTP
+app.post("/api/user/update-email", authenticateToken, ensureOtpVerified, sanitizeBody, async (req, res) => {
+  try {
+    const { newEmail } = req.body;
+    if (!newEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newEmail)) {
       await Log.create({
-        action: "stats_fetch_error",
+        action: "email_update_failed",
         user: req.user.id,
-        details: { error: error.message },
+        details: { reason: "Invalid email format" },
       });
-      res.status(500).json({ error: "Server error" });
+      return res.status(400).json({ error: "Please provide a valid new email address" });
     }
+
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      await Log.create({
+        action: "email_update_failed",
+        user: req.user.id,
+        details: { reason: "User not found" },
+      });
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    if (newEmail === user.email) {
+      await Log.create({
+        action: "email_update_failed",
+        user: user._id,
+        details: { reason: "New email same as current" },
+      });
+      return res.status(400).json({ error: "New email cannot be the same as current email" });
+    }
+
+    const existingUser = await User.findOne({ email: newEmail });
+    if (existingUser) {
+      await Log.create({
+        action: "email_update_failed",
+        user: user._id,
+        details: { reason: "Email already registered" },
+      });
+      return res.status(400).json({ error: "Email already registered" });
+    }
+
+    const otp = generateOTP();
+    const otpExpiry = new Date(Date.now() + 10 * 60 * 1000);
+
+    user.tempEmail = newEmail;
+    user.otp = otp;
+    user.otpExpiry = otpExpiry;
+    await user.save();
+
+    const emailSent = await sendEmail(
+      newEmail,
+      "MediTrust Email Update OTP",
+      `Your OTP for email update is ${otp}. It expires in 10 minutes.`
+    );
+    if (!emailSent) {
+      await Log.create({
+        action: "email_update_failed",
+        user: user._id,
+        details: { reason: "Failed to send OTP email" },
+      });
+      return res.status(500).json({ error: "Failed to send OTP to new email" });
+    }
+
+    await Log.create({
+      action: "email_update_initiated",
+      user: user._id,
+      details: { newEmail },
+    });
+    res.json({ message: "OTP sent to your new email" });
+  } catch (error) {
+    console.error("Email Update Initiation Error:", error);
+    await Log.create({
+      action: "email_update_error",
+      user: req.user.id,
+      details: { error: error.message },
+    });
+    res.status(500).json({ error: "Server error" });
   }
-);
+});
+
+// Verify Email Update OTP
+app.post("/api/user/verify-update-email", authenticateToken, ensureOtpVerified, sanitizeBody, async (req, res) => {
+  try {
+    const { newEmail, otp } = req.body;
+    if (!newEmail || !otp || !/^\d{6}$/.test(otp)) {
+      await Log.create({
+        action: "email_update_failed",
+        user: req.user.id,
+        details: { reason: "Invalid email or OTP format" },
+      });
+      return res.status(400).json({ error: "Please provide new email and valid 6-digit OTP" });
+    }
+
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      await Log.create({
+        action: "email_update_failed",
+        user: req.user.id,
+        details: { reason: "User not found" },
+      });
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    if (user.tempEmail !== newEmail || user.otp !== otp || user.otpExpiry < new Date()) {
+      await Log.create({
+        action: "email_update_failed",
+        user: user._id,
+        details: { reason: "Invalid or expired OTP" },
+      });
+      return res.status(400).json({ error: "Invalid or expired OTP" });
+    }
+
+    user.email = newEmail;
+    user.tempEmail = undefined;
+    user.otp = undefined;
+    user.otpExpiry = undefined;
+    await user.save();
+
+    await Log.create({
+      action: "email_update_success",
+      user: user._id,
+      details: { newEmail },
+    });
+    res.json({ message: "Email updated successfully" });
+  } catch (error) {
+    console.error("Email Update Verification Error:", error);
+    await Log.create({
+      action: "email_update_error",
+      user: req.user.id,
+      details: { error: error.message },
+    });
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Update Phone
+app.post("/api/user/update-phone", authenticateToken, ensureOtpVerified, sanitizeBody, async (req, res) => {
+  try {
+    const { newPhone } = req.body;
+    if (!newPhone || !/^\+?[1-9]\d{1,14}$/.test(newPhone)) {
+      await Log.create({
+        action: "phone_update_failed",
+        user: req.user.id,
+        details: { reason: "Invalid phone number format" },
+      });
+      return res.status(400).json({ error: "Please provide a valid phone number (e.g., +1234567890)" });
+    }
+
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      await Log.create({
+        action: "phone_update_failed",
+        user: req.user.id,
+        details: { reason: "User not found" },
+      });
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    user.phone = newPhone;
+    await user.save();
+
+    await Log.create({
+      action: "phone_update_success",
+      user: user._id,
+      details: { newPhone },
+    });
+    res.json({ message: "Phone number updated successfully" });
+  } catch (error) {
+    console.error("Phone Update Error:", error);
+    await Log.create({
+      action: "phone_update_error",
+      user: req.user.id,
+      details: { error: error.message },
+    });
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// User Stats Route
+app.get("/api/user/stats", authenticateToken, ensureOtpVerified, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const donations = await Donation.countDocuments({ donor: userId });
+    const requests = await Request.countDocuments({ requester: userId });
+    const completedTransactions = await Donation.countDocuments({
+      donor: userId,
+      status: "received",
+    });
+    const activeRequests = await Request.countDocuments({
+      requester: userId,
+      status: { $in: ["pending", "approved", "dispatched"] },
+    });
+    const livesHelped = await Donation.aggregate([
+      { $match: { donor: new mongoose.Types.ObjectId(userId), status: "received" } },
+      { $group: { _id: null, totalImpact: { $sum: "$impact" } } },
+    ]);
+
+    const trustScore = 95; // Placeholder
+    const impactScore = Math.min(Math.round(livesHelped[0]?.totalImpact / 10) || 0, 100) + "%";
+
+    res.json({
+      totalDonations: donations,
+      activeRequests,
+      completedTransactions,
+      impactScore,
+      livesHelped: livesHelped[0]?.totalImpact || 0,
+      trustScore: `${trustScore}%`,
+      donationChange: "+0%",
+      requestChange: "+0%",
+      transactionChange: "+0%",
+      impactChange: "+0%",
+    });
+  } catch (error) {
+    console.error("Stats Fetch Error:", error);
+    await Log.create({
+      action: "stats_fetch_error",
+      user: req.user.id,
+      details: { error: error.message },
+    });
+    res.status(500).json({ error: "Server error" });
+  }
+});
 
 // User Requests Route
-app.get(
-  "/api/user/requests",
-  authenticateToken,
-  ensureOtpVerified,
-  async (req, res) => {
-    try {
-      const requests = await Request.find({ requester: req.user.id })
-        .populate("medicine", "name")
-        .lean();
-      const formattedRequests = requests.map((req) => ({
-        id: req._id.toString(),
-        medicine: req.medicine?.name || "Unknown Medicine",
-        quantity: req.quantity,
-        status: req.status,
-        date: req.createdAt,
-        priority: req.priority,
-      }));
-      res.json(formattedRequests);
-    } catch (error) {
-      console.error("Requests Fetch Error:", error);
-      await Log.create({
-        action: "requests_fetch_error",
-        user: req.user.id,
-        details: { error: error.message },
-      });
-      res.status(500).json({ error: "Server error" });
-    }
+app.get("/api/user/requests", authenticateToken, ensureOtpVerified, async (req, res) => {
+  try {
+    const requests = await Request.find({ requester: req.user.id })
+      .populate("medicine", "name")
+      .lean();
+    const formattedRequests = requests.map((req) => ({
+      id: req._id.toString(),
+      medicine: req.medicine?.name || "Unknown Medicine",
+      quantity: req.quantity,
+      status: req.status,
+      date: req.createdAt,
+      priority: req.priority,
+    }));
+    res.json(formattedRequests);
+  } catch (error) {
+    console.error("Requests Fetch Error:", error);
+    await Log.create({
+      action: "requests_fetch_error",
+      user: req.user.id,
+      details: { error: error.message },
+    });
+    res.status(500).json({ error: "Server error" });
   }
-);
+});
 
 // User Donations Route
-app.get(
-  "/api/user/donations",
-  authenticateToken,
-  ensureOtpVerified,
-  async (req, res) => {
-    try {
-      const donations = await Donation.find({ donor: req.user.id })
-        .populate("medicine", "name")
-        .populate("recipient", "firstName lastName email")
-        .lean();
-      const formattedDonations = donations.map((don) => ({
-        id: don._id.toString(),
-        medicine: don.medicine?.name || "Unknown Medicine",
-        quantity: don.quantity || "N/A",
-        date: don.createdAt,
-        recipient: don.recipient
-          ? `${don.recipient.firstName || ""} ${
-              don.recipient.lastName || ""
-            }`.trim() || don.recipient.email
-          : don.recipientType === "Hospital"
-          ? "Hospital Recipient"
-          : "N/A",
-        impact: don.impact,
-      }));
-      res.json(formattedDonations);
-    } catch (error) {
-      console.error("Donations Fetch Error:", error);
-      await Log.create({
-        action: "donations_fetch_error",
-        user: req.user.id,
-        details: { error: error.message },
-      });
-      res.status(500).json({ error: "Server error" });
-    }
+app.get("/api/user/donations", authenticateToken, ensureOtpVerified, async (req, res) => {
+  try {
+    const donations = await Donation.find({ donor: req.user.id })
+      .populate("medicine", "name")
+      .populate("recipient", "firstName lastName email")
+      .lean();
+    const formattedDonations = donations.map((don) => ({
+      id: don._id.toString(),
+      medicine: don.medicine?.name || "Unknown Medicine",
+      quantity: don.quantity || "N/A",
+      date: don.createdAt,
+      recipient: don.recipient
+        ? `${don.recipient.firstName || ""} ${don.recipient.lastName || ""}`.trim() || don.recipient.email
+        : don.recipientType === "Hospital"
+        ? "Hospital Recipient"
+        : "N/A",
+      impact: don.impact,
+    }));
+    res.json(formattedDonations);
+  } catch (error) {
+    console.error("Donations Fetch Error:", error);
+    await Log.create({
+      action: "donations_fetch_error",
+      user: req.user.id,
+      details: { error: error.message },
+    });
+    res.status(500).json({ error: "Server error" });
   }
-);
+});
 
 // User Notifications Route
-app.get(
-  "/api/user/notifications",
-  authenticateToken,
-  ensureOtpVerified,
-  async (req, res) => {
-    try {
-      const user = await User.findById(req.user.id).select("notifications");
-      if (!user) {
-        await Log.create({
-          action: "notifications_fetch_failed",
-          user: req.user.id,
-          details: { reason: "User not found" },
-        });
-        return res.status(404).json({ error: "User not found" });
-      }
-      const formattedNotifications = user.notifications.map((notif, index) => ({
-        type:
-          notif.type ||
-          (index % 3 === 0 ? "success" : index % 3 === 1 ? "info" : "warning"),
-        title:
-          notif.type === "success"
-            ? "Request Approved"
-            : notif.type === "info"
-            ? "Donation Received"
-            : "New Medicine Available",
-        message: notif.message || "Notification details",
-        time: new Date(notif.createdAt).toLocaleTimeString(),
-      }));
-      res.json(formattedNotifications);
-    } catch (error) {
-      console.error("Notifications Fetch Error:", error);
+app.get("/api/user/notifications", authenticateToken, ensureOtpVerified, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select("notifications");
+    if (!user) {
       await Log.create({
-        action: "notifications_fetch_error",
+        action: "notifications_fetch_failed",
         user: req.user.id,
-        details: { error: error.message },
+        details: { reason: "User not found" },
       });
-      res.status(500).json({ error: "Server error" });
+      return res.status(404).json({ error: "User not found" });
     }
+    const formattedNotifications = user.notifications.map((notif, index) => ({
+      type: notif.type || (index % 3 === 0 ? "success" : index % 3 === 1 ? "info" : "warning"),
+      title: notif.type === "success" ? "Request Approved" : notif.type === "info" ? "Donation Received" : "New Medicine Available",
+      message: notif.message || "Notification details",
+      time: new Date(notif.createdAt).toLocaleTimeString(),
+    }));
+    res.json(formattedNotifications);
+  } catch (error) {
+    console.error("Notifications Fetch Error:", error);
+    await Log.create({
+      action: "notifications_fetch_error",
+      user: req.user.id,
+      details: { error: error.message },
+    });
+    res.status(500).json({ error: "Server error" });
   }
-);
+});
 
 // Available Medicines Route (Public)
 app.get("/api/medicines/available", async (req, res) => {
   try {
-    const medicines = await Medicine.find({
-      isFlagged: false,
-      quantity: { $ne: "0" },
-    })
+    const medicines = await Medicine.find({ isFlagged: false, quantity: { $ne: "0" } })
       .select("name quantity storageConditions")
       .limit(4)
       .lean();
@@ -932,6 +992,7 @@ app.get("/api/medicines/available", async (req, res) => {
   }
 });
 
+// Start server
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
