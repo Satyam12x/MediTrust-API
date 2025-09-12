@@ -10,6 +10,7 @@ const helmet = require("helmet");
 const sanitize = require("sanitize-html");
 const cloudinary = require("cloudinary").v2;
 const multer = require("multer");
+const { CloudinaryStorage } = require("multer-storage-cloudinary");
 
 dotenv.config();
 
@@ -35,7 +36,17 @@ if (CLOUDINARY_CLOUD_NAME && CLOUDINARY_API_KEY && CLOUDINARY_API_SECRET) {
 }
 
 // Multer configuration for file uploads
-const storage = multer.memoryStorage();
+const storage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  params: {
+    folder: "meditrust_profiles",
+    allowed_formats: ["jpg", "jpeg", "png"],
+    resource_type: "image",
+    upload_preset: "meditrust_profile",
+    public_id: (req, file) => `profile_${req.user.id}_${Date.now()}`,
+  },
+});
+
 const upload = multer({
   storage,
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
@@ -44,7 +55,7 @@ const upload = multer({
     if (allowedTypes.includes(file.mimetype)) {
       cb(null, true);
     } else {
-      cb(new Error("Only JPEG, JPG, and PNG images are allowed"));
+      cb(new Error("Only JPEG, JPG, and PNG images are allowed"), false);
     }
   },
 });
@@ -840,23 +851,7 @@ app.post(
         return res.status(404).json({ error: "User not found" });
       }
 
-      // Upload to Cloudinary
-      const result = await new Promise((resolve, reject) => {
-        const stream = cloudinary.uploader.upload_stream(
-          {
-            folder: "meditrust_profiles",
-            upload_preset: "meditrust_profile",
-            resource_type: "image",
-          },
-          (error, result) => {
-            if (error) reject(error);
-            else resolve(result);
-          }
-        );
-        stream.end(req.file.buffer);
-      });
-
-      user.profilePicture = result.secure_url;
+      user.profilePicture = req.file.path; // Cloudinary URL
       await user.save();
 
       await Log.create({
@@ -864,13 +859,13 @@ app.post(
         user: user._id,
         details: {
           email: user.email,
-          profilePicture: result.secure_url,
-          cloudinaryPublicId: result.public_id,
+          profilePicture: req.file.path,
+          cloudinaryPublicId: req.file.filename,
         },
       });
       res.json({
         message: "Profile picture uploaded successfully",
-        profilePicture: result.secure_url,
+        profilePicture: req.file.path,
       });
     } catch (error) {
       console.error("Profile Picture Upload Error:", error);
@@ -879,7 +874,7 @@ app.post(
         user: req.user.id,
         details: { error: error.message },
       });
-      res.status(500).json({ error: "Server error", details: error.message });
+      res.status(500).json({ error: "Failed to upload profile picture" });
     }
   }
 );
@@ -1467,21 +1462,7 @@ app.post(
       // Upload image to Cloudinary if provided
       let imageUrl = null;
       if (req.file) {
-        const result = await new Promise((resolve, reject) => {
-          const stream = cloudinary.uploader.upload_stream(
-            {
-              folder: "meditrust_medicines",
-              upload_preset: "meditrust_profile",
-              resource_type: "image",
-            },
-            (error, result) => {
-              if (error) reject(error);
-              else resolve(result);
-            }
-          );
-          stream.end(req.file.buffer);
-        });
-        imageUrl = result.secure_url;
+        imageUrl = req.file.path; // Cloudinary URL
       }
 
       const medicine = new Medicine({
@@ -1580,25 +1561,9 @@ app.post(
         return res.status(404).json({ error: "User not found" });
       }
 
-      // Upload document to Cloudinary
-      const result = await new Promise((resolve, reject) => {
-        const stream = cloudinary.uploader.upload_stream(
-          {
-            folder: "meditrust_kyc",
-            upload_preset: "meditrust_profile",
-            resource_type: "image",
-          },
-          (error, result) => {
-            if (error) reject(error);
-            else resolve(result);
-          }
-        );
-        stream.end(req.file.buffer);
-      });
-
       user.kycDocuments.push({
         documentType,
-        url: result.secure_url,
+        url: req.file.path,
         verified: false,
       });
       await user.save();
@@ -1606,7 +1571,7 @@ app.post(
       await Log.create({
         action: "kyc_upload_success",
         user: user._id,
-        details: { documentType, documentUrl: result.secure_url },
+        details: { documentType, documentUrl: req.file.path },
       });
       res.json({
         message: "KYC document uploaded successfully, pending verification",
