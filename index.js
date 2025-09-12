@@ -36,17 +36,7 @@ if (CLOUDINARY_CLOUD_NAME && CLOUDINARY_API_KEY && CLOUDINARY_API_SECRET) {
 }
 
 // Multer configuration for file uploads
-const storage = new CloudinaryStorage({
-  cloudinary: cloudinary,
-  params: {
-    folder: "meditrust_profiles",
-    allowed_formats: ["jpg", "jpeg", "png"],
-    resource_type: "image",
-    upload_preset: "meditrust_profile",
-    public_id: (req, file) => `profile_${req.user.id}_${Date.now()}`,
-  },
-});
-
+const storage = multer.memoryStorage();
 const upload = multer({
   storage,
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
@@ -832,6 +822,13 @@ app.post(
   upload.single("profilePicture"),
   async (req, res) => {
     try {
+      // Log request details
+      console.log("Upload request received:", {
+        userId: req.user.id,
+        file: req.file,
+      });
+
+      // Validate file presence
       if (!req.file) {
         await Log.create({
           action: "profile_picture_upload_failed",
@@ -841,6 +838,7 @@ app.post(
         return res.status(400).json({ error: "Please upload an image file" });
       }
 
+      // Validate user
       const user = await User.findById(req.user.id);
       if (!user) {
         await Log.create({
@@ -851,30 +849,61 @@ app.post(
         return res.status(404).json({ error: "User not found" });
       }
 
-      user.profilePicture = req.file.path; // Cloudinary URL
+      // Upload to Cloudinary
+      const result = await new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+          {
+            folder: "meditrust_profiles",
+            upload_preset: "meditrust_profile",
+            resource_type: "image",
+          },
+          (error, result) => {
+            if (error) reject(error);
+            else resolve(result);
+          }
+        );
+        stream.end(req.file.buffer);
+      });
+
+      // Log Cloudinary response
+      console.log("Cloudinary upload response:", {
+        url: result.secure_url,
+        publicId: result.public_id,
+      });
+
+      // Update user profile picture
+      user.profilePicture = result.secure_url;
       await user.save();
 
+      // Log success
       await Log.create({
         action: "profile_picture_upload_success",
         user: user._id,
         details: {
           email: user.email,
-          profilePicture: req.file.path,
-          cloudinaryPublicId: req.file.filename,
+          profilePicture: result.secure_url,
+          cloudinaryPublicId: result.public_id,
         },
       });
+
       res.json({
         message: "Profile picture uploaded successfully",
-        profilePicture: req.file.path,
+        profilePicture: result.secure_url,
       });
     } catch (error) {
-      console.error("Profile Picture Upload Error:", error);
+      console.error("Profile Picture Upload Error:", {
+        message: error.message,
+        stack: error.stack,
+      });
       await Log.create({
         action: "profile_picture_upload_error",
-        user: req.user.id,
-        details: { error: error.message },
+        user: req.user?.id,
+        details: { error: error.message, stack: error.stack },
       });
-      res.status(500).json({ error: "Failed to upload profile picture" });
+      res.status(500).json({
+        error: "Failed to upload profile picture",
+        details: error.message || "Unknown server error",
+      });
     }
   }
 );
