@@ -8,17 +8,46 @@ const nodemailer = require("nodemailer");
 const rateLimit = require("express-rate-limit");
 const helmet = require("helmet");
 const sanitize = require("sanitize-html");
+const cloudinary = require("cloudinary").v2;
+const multer = require("multer");
 
 dotenv.config();
 
 // Environment variables
 const PORT = process.env.PORT || 5000;
 const MONGO_URI =
-  process.env.MONGO_URL;
-const JWT_SECRET = process.env.JWT_SECRET;
-const NODEMAILER_EMAIL = process.env.NODEMAILER_EMAIL;
+  process.env.MONGO_URL || "mongodb://localhost:27017/meditrust";
+const JWT_SECRET = process.env.JWT_SECRET || "your_jwt_secret_key_12345";
+const NODEMAILER_EMAIL = process.env.NODEMAILER_EMAIL || "your_email@gmail.com";
 const NODEMAILER_PASS =
-  process.env.NODEMAILER_PASS;
+  process.env.NODEMAILER_PASS || "your_app_specific_password";
+const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME;
+const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY;
+const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET;
+
+// Cloudinary configuration
+if (CLOUDINARY_CLOUD_NAME && CLOUDINARY_API_KEY && CLOUDINARY_API_SECRET) {
+  cloudinary.config({
+    cloud_name: CLOUDINARY_CLOUD_NAME,
+    api_key: CLOUDINARY_API_KEY,
+    api_secret: CLOUDINARY_API_SECRET,
+  });
+}
+
+// Multer configuration for file uploads
+const storage = multer.memoryStorage();
+const upload = multer({
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = ["image/jpeg", "image/png", "image/jpg"];
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error("Only JPEG, JPG, and PNG images are allowed"));
+    }
+  },
+});
 
 // MongoDB connection
 mongoose
@@ -69,7 +98,7 @@ const userSchema = new mongoose.Schema(
     },
     otp: { type: String },
     otpExpiry: { type: Date },
-    tempEmail: { type: String }, // Temporary field for email update
+    tempEmail: { type: String },
     createdAt: { type: Date, default: Date.now },
     updatedAt: { type: Date, default: Date.now },
   },
@@ -307,11 +336,9 @@ app.post("/api/signup", sanitizeBody, async (req, res) => {
         action: "signup_failed",
         details: { email, reason: "Missing required fields" },
       });
-      return res
-        .status(400)
-        .json({
-          error: "Please provide email, password, and confirm password",
-        });
+      return res.status(400).json({
+        error: "Please provide email, password, and confirm password",
+      });
     }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       await Log.create({
@@ -427,12 +454,10 @@ app.post("/api/complete-registration", sanitizeBody, async (req, res) => {
         action: "complete_registration_failed",
         details: { email, reason: "Missing required fields" },
       });
-      return res
-        .status(400)
-        .json({
-          error:
-            "Please provide first name, last name, age, user type, location, and agree to terms",
-        });
+      return res.status(400).json({
+        error:
+          "Please provide first name, last name, age, user type, location, and agree to terms",
+      });
     }
     if (age < 18) {
       await Log.create({
@@ -742,7 +767,7 @@ app.post("/api/reset-password", sanitizeBody, async (req, res) => {
 app.get("/api/user/profile", authenticateToken, async (req, res) => {
   try {
     const user = await User.findById(req.user.id).select(
-      "firstName lastName email phone kycVerified certificates userType status profilePicture location createdAt"
+      "firstName lastName email phone kycVerified certificates userType status profilePicture location createdAt incentives donationHistory requestHistory"
     );
     if (!user) {
       await Log.create({
@@ -752,6 +777,14 @@ app.get("/api/user/profile", authenticateToken, async (req, res) => {
       });
       return res.status(404).json({ error: "User not found" });
     }
+    const badges = (user.certificates || []).map((cert, index) => ({
+      certificateId: cert.certificateId,
+      blockchainHash: cert.blockchainHash,
+      url: cert.url,
+      type: index % 3 === 0 ? "gold" : index % 3 === 1 ? "silver" : "bronze",
+      issuedAt: cert.issuedAt || new Date(),
+      description: "Awarded for your contributions to the community",
+    }));
     res.json({
       firstName: user.firstName || "",
       lastName: user.lastName || "",
@@ -764,6 +797,10 @@ app.get("/api/user/profile", authenticateToken, async (req, res) => {
       profilePicture: user.profilePicture || "",
       location: user.location || "Not specified",
       createdAt: user.createdAt || new Date(),
+      incentives: user.incentives || 0,
+      donationCount: user.donationHistory.length || 0,
+      requestCount: user.requestHistory.length || 0,
+      badges,
     });
   } catch (error) {
     console.error("Profile Fetch Error:", error);
@@ -775,6 +812,158 @@ app.get("/api/user/profile", authenticateToken, async (req, res) => {
     res.status(500).json({ error: "Server error", details: error.message });
   }
 });
+
+// Upload Profile Picture Route
+app.post(
+  "/api/user/upload-profile-picture",
+  authenticateToken,
+  ensureOtpVerified,
+  upload.single("profilePicture"),
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        await Log.create({
+          action: "profile_picture_upload_failed",
+          user: req.user.id,
+          details: { reason: "No file uploaded" },
+        });
+        return res.status(400).json({ error: "Please upload an image file" });
+      }
+
+      const user = await User.findById(req.user.id);
+      if (!user) {
+        await Log.create({
+          action: "profile_picture_upload_failed",
+          user: req.user.id,
+          details: { reason: "User not found" },
+        });
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      // Upload to Cloudinary
+      const result = await new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+          {
+            folder: "meditrust_profiles",
+            upload_preset: "meditrust_profile",
+            resource_type: "image",
+          },
+          (error, result) => {
+            if (error) reject(error);
+            else resolve(result);
+          }
+        );
+        stream.end(req.file.buffer);
+      });
+
+      user.profilePicture = result.secure_url;
+      await user.save();
+
+      await Log.create({
+        action: "profile_picture_upload_success",
+        user: user._id,
+        details: {
+          email: user.email,
+          profilePicture: result.secure_url,
+          cloudinaryPublicId: result.public_id,
+        },
+      });
+      res.json({
+        message: "Profile picture uploaded successfully",
+        profilePicture: result.secure_url,
+      });
+    } catch (error) {
+      console.error("Profile Picture Upload Error:", error);
+      await Log.create({
+        action: "profile_picture_upload_error",
+        user: req.user.id,
+        details: { error: error.message },
+      });
+      res.status(500).json({ error: "Server error", details: error.message });
+    }
+  }
+);
+
+// Update Password Route
+app.post(
+  "/api/user/update-password",
+  authenticateToken,
+  ensureOtpVerified,
+  sanitizeBody,
+  async (req, res) => {
+    try {
+      const { currentPassword, newPassword, confirmNewPassword } = req.body;
+      if (!currentPassword || !newPassword || !confirmNewPassword) {
+        await Log.create({
+          action: "password_update_failed",
+          user: req.user.id,
+          details: { reason: "Missing required fields" },
+        });
+        return res.status(400).json({
+          error:
+            "Please provide current password, new password, and confirm new password",
+        });
+      }
+      if (newPassword.length < 6) {
+        await Log.create({
+          action: "password_update_failed",
+          user: req.user.id,
+          details: { reason: "New password too short" },
+        });
+        return res
+          .status(400)
+          .json({ error: "New password must be at least 6 characters long" });
+      }
+      if (newPassword !== confirmNewPassword) {
+        await Log.create({
+          action: "password_update_failed",
+          user: req.user.id,
+          details: { reason: "New passwords do not match" },
+        });
+        return res.status(400).json({ error: "New passwords do not match" });
+      }
+
+      const user = await User.findById(req.user.id);
+      if (!user) {
+        await Log.create({
+          action: "password_update_failed",
+          user: req.user.id,
+          details: { reason: "User not found" },
+        });
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const isMatch = await bcrypt.compare(currentPassword, user.password);
+      if (!isMatch) {
+        await Log.create({
+          action: "password_update_failed",
+          user: user._id,
+          details: { reason: "Incorrect current password" },
+        });
+        return res.status(401).json({ error: "Incorrect current password" });
+      }
+
+      const hashedPassword = await bcrypt.hash(newPassword, 10);
+      user.password = hashedPassword;
+      await user.save();
+
+      await Log.create({
+        action: "password_update_success",
+        user: user._id,
+        details: { email: user.email },
+      });
+      res.json({ message: "Password updated successfully" });
+    } catch (error) {
+      console.error("Password Update Error:", error);
+      await Log.create({
+        action: "password_update_error",
+        user: req.user.id,
+        details: { error: error.message },
+      });
+      res.status(500).json({ error: "Server error", details: error.message });
+    }
+  }
+);
 
 // Update Email - Send OTP
 app.post(
@@ -951,11 +1140,9 @@ app.post(
           user: req.user.id,
           details: { reason: "Invalid phone number format" },
         });
-        return res
-          .status(400)
-          .json({
-            error: "Please provide a valid phone number (e.g., +1234567890)",
-          });
+        return res.status(400).json({
+          error: "Please provide a valid phone number (e.g., +1234567890)",
+        });
       }
 
       const user = await User.findById(req.user.id);
@@ -1017,21 +1204,61 @@ app.get(
         { $group: { _id: null, totalImpact: { $sum: "$impact" } } },
       ]);
 
-      const trustScore = 95; // Placeholder
-      const impactScore =
-        Math.min(Math.round(livesHelped[0]?.totalImpact / 10) || 0, 100) + "%";
+      // Calculate changes (example logic, adjust as needed)
+      const previousDonations = donations; // Placeholder: Fetch previous period data
+      const previousRequests = requests;
+      const previousTransactions = completedTransactions;
+      const previousImpact = livesHelped[0]?.totalImpact || 0;
+      const donationChange =
+        previousDonations > 0
+          ? (
+              ((donations - previousDonations) / previousDonations) *
+              100
+            ).toFixed(1) + "%"
+          : "+0%";
+      const requestChange =
+        previousRequests > 0
+          ? (((requests - previousRequests) / previousRequests) * 100).toFixed(
+              1
+            ) + "%"
+          : "+0%";
+      const transactionChange =
+        previousTransactions > 0
+          ? (
+              ((completedTransactions - previousTransactions) /
+                previousTransactions) *
+              100
+            ).toFixed(1) + "%"
+          : "+0%";
+      const impactChange =
+        previousImpact > 0
+          ? (
+              ((livesHelped[0]?.totalImpact - previousImpact) /
+                previousImpact) *
+              100
+            ).toFixed(1) + "%"
+          : "+0%";
+
+      const trustScore = Math.min(
+        95 + Math.round((livesHelped[0]?.totalImpact || 0) / 50),
+        100
+      );
+      const impactScore = Math.min(
+        Math.round((livesHelped[0]?.totalImpact || 0) / 10),
+        100
+      );
 
       res.json({
         totalDonations: donations,
         activeRequests,
         completedTransactions,
-        impactScore,
+        impactScore: `${impactScore}%`,
         livesHelped: livesHelped[0]?.totalImpact || 0,
         trustScore: `${trustScore}%`,
-        donationChange: "+0%",
-        requestChange: "+0%",
-        transactionChange: "+0%",
-        impactChange: "+0%",
+        donationChange,
+        requestChange,
+        transactionChange,
+        impactChange,
       });
     } catch (error) {
       console.error("Stats Fetch Error:", error);
@@ -1176,6 +1403,265 @@ app.get("/api/medicines/available", async (req, res) => {
     res.status(500).json({ error: "Server error" });
   }
 });
+
+// Upload Medicine Route
+app.post(
+  "/api/medicines/upload",
+  authenticateToken,
+  ensureOtpVerified,
+  upload.single("image"),
+  sanitizeBody,
+  async (req, res) => {
+    try {
+      const {
+        name,
+        batchNo,
+        expiryDate,
+        quantity,
+        storageConditions,
+        isPrescription,
+      } = req.body;
+
+      if (!name || !batchNo || !expiryDate || !quantity) {
+        await Log.create({
+          action: "medicine_upload_failed",
+          user: req.user.id,
+          details: { reason: "Missing required fields" },
+        });
+        return res
+          .status(400)
+          .json({ error: "Please provide all required fields" });
+      }
+
+      if (new Date(expiryDate) <= new Date()) {
+        await Log.create({
+          action: "medicine_upload_failed",
+          user: req.user.id,
+          details: { reason: "Expiry date must be in the future" },
+        });
+        return res
+          .status(400)
+          .json({ error: "Expiry date must be in the future" });
+      }
+
+      const existingMedicine = await Medicine.findOne({ batchNo });
+      if (existingMedicine) {
+        await Log.create({
+          action: "medicine_upload_failed",
+          user: req.user.id,
+          details: { reason: "Batch number already exists" },
+        });
+        return res.status(400).json({ error: "Batch number already exists" });
+      }
+
+      const user = await User.findById(req.user.id);
+      if (!user) {
+        await Log.create({
+          action: "medicine_upload_failed",
+          user: req.user.id,
+          details: { reason: "User not found" },
+        });
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      // Upload image to Cloudinary if provided
+      let imageUrl = null;
+      if (req.file) {
+        const result = await new Promise((resolve, reject) => {
+          const stream = cloudinary.uploader.upload_stream(
+            {
+              folder: "meditrust_medicines",
+              upload_preset: "meditrust_profile",
+              resource_type: "image",
+            },
+            (error, result) => {
+              if (error) reject(error);
+              else resolve(result);
+            }
+          );
+          stream.end(req.file.buffer);
+        });
+        imageUrl = result.secure_url;
+      }
+
+      const medicine = new Medicine({
+        name,
+        batchNo,
+        expiryDate,
+        quantity,
+        donor: req.user.id,
+        donorType: user.userType === "hospital" ? "Hospital" : "User",
+        hospital: user.userType === "hospital" ? req.user.id : null,
+        storageConditions,
+        isPrescription,
+        image: imageUrl,
+      });
+      await medicine.save();
+
+      await Log.create({
+        action: "medicine_upload_success",
+        user: req.user.id,
+        details: { medicineId: medicine._id, name, batchNo, image: imageUrl },
+      });
+      res.json({ message: "Medicine uploaded successfully", medicine });
+    } catch (error) {
+      console.error("Medicine Upload Error:", error);
+      await Log.create({
+        action: "medicine_upload_error",
+        user: req.user.id,
+        details: { error: error.message },
+      });
+      res.status(500).json({ error: "Server error", details: error.message });
+    }
+  }
+);
+
+// Request Tracking Route
+app.get(
+  "/api/tracking",
+  authenticateToken,
+  ensureOtpVerified,
+  async (req, res) => {
+    try {
+      const requests = await Request.find({ requester: req.user.id })
+        .populate("medicine", "name")
+        .lean();
+      const formattedTracking = requests.map((req) => ({
+        id: req._id.toString(),
+        medicine: req.medicine?.name || "Unknown Medicine",
+        quantity: req.quantity,
+        status: req.status,
+        trackingId: req.trackingId || "N/A",
+        gpsLocation: req.gpsLocation || "N/A",
+        priority: req.priority,
+        date: req.createdAt,
+      }));
+      res.json(formattedTracking);
+    } catch (error) {
+      console.error("Tracking Fetch Error:", error);
+      await Log.create({
+        action: "tracking_fetch_error",
+        user: req.user.id,
+        details: { error: error.message },
+      });
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+);
+
+// KYC Verification Route
+app.post(
+  "/api/kyc",
+  authenticateToken,
+  ensureOtpVerified,
+  upload.single("document"),
+  sanitizeBody,
+  async (req, res) => {
+    try {
+      const { documentType } = req.body;
+      if (!documentType || !req.file) {
+        await Log.create({
+          action: "kyc_upload_failed",
+          user: req.user.id,
+          details: { reason: "Missing document type or file" },
+        });
+        return res
+          .status(400)
+          .json({ error: "Please provide document type and file" });
+      }
+
+      const user = await User.findById(req.user.id);
+      if (!user) {
+        await Log.create({
+          action: "kyc_upload_failed",
+          user: req.user.id,
+          details: { reason: "User not found" },
+        });
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      // Upload document to Cloudinary
+      const result = await new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+          {
+            folder: "meditrust_kyc",
+            upload_preset: "meditrust_profile",
+            resource_type: "image",
+          },
+          (error, result) => {
+            if (error) reject(error);
+            else resolve(result);
+          }
+        );
+        stream.end(req.file.buffer);
+      });
+
+      user.kycDocuments.push({
+        documentType,
+        url: result.secure_url,
+        verified: false,
+      });
+      await user.save();
+
+      await Log.create({
+        action: "kyc_upload_success",
+        user: user._id,
+        details: { documentType, documentUrl: result.secure_url },
+      });
+      res.json({
+        message: "KYC document uploaded successfully, pending verification",
+      });
+    } catch (error) {
+      console.error("KYC Upload Error:", error);
+      await Log.create({
+        action: "kyc_upload_error",
+        user: req.user.id,
+        details: { error: error.message },
+      });
+      res.status(500).json({ error: "Server error", details: error.message });
+    }
+  }
+);
+
+// Certificates Route
+app.get(
+  "/api/certificates",
+  authenticateToken,
+  ensureOtpVerified,
+  async (req, res) => {
+    try {
+      const user = await User.findById(req.user.id).select("certificates");
+      if (!user) {
+        await Log.create({
+          action: "certificates_fetch_failed",
+          user: req.user.id,
+          details: { reason: "User not found" },
+        });
+        return res.status(404).json({ error: "User not found" });
+      }
+      const formattedCertificates = (user.certificates || []).map(
+        (cert, index) => ({
+          certificateId: cert.certificateId,
+          blockchainHash: cert.blockchainHash,
+          url: cert.url,
+          type:
+            index % 3 === 0 ? "gold" : index % 3 === 1 ? "silver" : "bronze",
+          issuedAt: cert.issuedAt || new Date(),
+          description: "Awarded for your contributions to the community",
+        })
+      );
+      res.json(formattedCertificates);
+    } catch (error) {
+      console.error("Certificates Fetch Error:", error);
+      await Log.create({
+        action: "certificates_fetch_error",
+        user: req.user.id,
+        details: { error: error.message },
+      });
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+);
 
 // Start server
 app.listen(PORT, () => {
