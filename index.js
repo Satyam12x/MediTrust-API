@@ -198,9 +198,10 @@ const donationSchema = new mongoose.Schema(
     },
     recipient: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     recipientType: { type: String, enum: ["User", "Hospital"] },
+    recipientName: { type: String, trim: true },
     status: {
       type: String,
-      enum: ["pending", "approved", "dispatched", "received"],
+      enum: ["pending", "approved", "dispatched", "delivered"],
       default: "pending",
     },
     trackingId: { type: String, trim: true },
@@ -208,6 +209,12 @@ const donationSchema = new mongoose.Schema(
     blockchainHash: { type: String },
     expiryAlertSent: { type: Boolean, default: false },
     impact: { type: Number, default: 0 },
+    value: { type: Number, default: 0 },
+    type: {
+      type: String,
+      enum: ["Medicine", "Equipment"],
+      default: "Medicine",
+    },
     createdAt: { type: Date, default: Date.now },
     updatedAt: { type: Date, default: Date.now },
   },
@@ -274,6 +281,9 @@ const transporter = nodemailer.createTransport({
 // Utility functions
 const generateOTP = () =>
   Math.floor(100000 + Math.random() * 900000).toString();
+
+const generateTrackingId = () =>
+  `TRK${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
 
 const sendEmail = async (to, subject, text) => {
   try {
@@ -1263,7 +1273,7 @@ app.get(
       const requests = await Request.countDocuments({ requester: userId });
       const completedTransactions = await Donation.countDocuments({
         donor: userId,
-        status: "received",
+        status: "delivered",
       });
       const activeRequests = await Request.countDocuments({
         requester: userId,
@@ -1273,7 +1283,7 @@ app.get(
         {
           $match: {
             donor: new mongoose.Types.ObjectId(userId),
-            status: "received",
+            status: "delivered",
           },
         },
         { $group: { _id: null, totalImpact: { $sum: "$impact" } } },
@@ -1378,36 +1388,81 @@ app.get(
   }
 );
 
-// User Donations Route
+// Donation History Route
 app.get(
-  "/api/user/donations",
+  "/api/donations/history",
   authenticateToken,
   ensureOtpVerified,
   async (req, res) => {
     try {
       const donations = await Donation.find({ donor: req.user.id })
-        .populate("medicine", "name")
-        .populate("recipient", "firstName lastName email")
+        .populate("medicine", "name type")
+        .populate("recipient", "firstName lastName email registrationNumber")
         .lean();
       const formattedDonations = donations.map((don) => ({
         id: don._id.toString(),
         medicine: don.medicine?.name || "Unknown Medicine",
-        quantity: don.quantity || "N/A",
+        type: don.medicine?.type || don.type || "Medicine",
         date: don.createdAt,
+        quantity: don.quantity || "N/A",
         recipient: don.recipient
-          ? `${don.recipient.firstName || ""} ${
-              don.recipient.lastName || ""
-            }`.trim() || don.recipient.email
-          : don.recipientType === "Hospital"
-          ? "Hospital Recipient"
-          : "N/A",
-        impact: don.impact,
+          ? don.recipientType === "Hospital"
+            ? don.recipient.registrationNumber || "Hospital Recipient"
+            : `${don.recipient.firstName || ""} ${
+                don.recipient.lastName || ""
+              }`.trim() || don.recipient.email
+          : don.recipientName || "N/A",
+        status: don.status.charAt(0).toUpperCase() + don.status.slice(1),
+        value: don.value || 0,
+        impact: don.impact || 0,
+        trackingId: don.trackingId || "N/A",
       }));
       res.json(formattedDonations);
     } catch (error) {
-      console.error("Donations Fetch Error:", error);
+      console.error("Donation History Fetch Error:", error);
       await Log.create({
-        action: "donations_fetch_error",
+        action: "donation_history_fetch_error",
+        user: req.user.id,
+        details: { error: error.message, stack: error.stack },
+      });
+      res.status(500).json({ error: "Server error", details: error.message });
+    }
+  }
+);
+
+// Donation Tracking Route
+app.get(
+  "/api/donations/track/:trackingId",
+  authenticateToken,
+  ensureOtpVerified,
+  async (req, res) => {
+    try {
+      const { trackingId } = req.params;
+      const donation = await Donation.findOne({
+        trackingId,
+        donor: req.user.id,
+      })
+        .populate("medicine", "name")
+        .lean();
+      if (!donation) {
+        await Log.create({
+          action: "donation_track_failed",
+          user: req.user.id,
+          details: { trackingId, reason: "Donation not found" },
+        });
+        return res.status(404).json({ error: "Donation not found" });
+      }
+      res.json({
+        trackingId: donation.trackingId,
+        medicine: donation.medicine?.name || "Unknown Medicine",
+        status:
+          donation.status.charAt(0).toUpperCase() + donation.status.slice(1),
+        date: donation.createdAt,
+      });
+    } catch (error) {
+      console.error("Donation Tracking Error:", error);
+      await Log.create({
+        action: "donation_track_error",
         user: req.user.id,
         details: { error: error.message, stack: error.stack },
       });
@@ -1495,6 +1550,7 @@ app.post(
         quantity,
         storageConditions,
         isPrescription,
+        type,
       } = req.body;
 
       console.log("Medicine upload request received:", {
@@ -1509,7 +1565,7 @@ app.post(
         body: req.body,
       });
 
-      if (!name || !batchNo || !expiryDate || !quantity) {
+      if (!name || !batchNo || !expiryDate || !quantity || !type) {
         await Log.create({
           action: "medicine_upload_failed",
           user: req.user.id,
@@ -1517,7 +1573,18 @@ app.post(
         });
         return res
           .status(400)
-          .json({ error: "Please provide all required fields" });
+          .json({ error: "Please provide all required fields including type" });
+      }
+
+      if (!["Medicine", "Equipment"].includes(type)) {
+        await Log.create({
+          action: "medicine_upload_failed",
+          user: req.user.id,
+          details: { reason: "Invalid type" },
+        });
+        return res
+          .status(400)
+          .json({ error: "Type must be Medicine or Equipment" });
       }
 
       if (new Date(expiryDate) <= new Date()) {
@@ -1595,14 +1662,33 @@ app.post(
               storageConditions,
               isPrescription,
               image: imageUrl,
+              type,
             });
             await medicine.save();
+
+            const donation = new Donation({
+              donor: req.user.id,
+              donorType: user.userType === "hospital" ? "Hospital" : "User",
+              medicine: medicine._id,
+              quantity,
+              type,
+              trackingId: generateTrackingId(),
+              value: parseFloat(quantity) * 10, // Example value calculation
+              impact: parseInt(quantity) * 2, // Example impact calculation
+              recipientName: "Pending Assignment",
+              status: "pending",
+            });
+            await donation.save();
+
+            user.donationHistory.push(donation._id);
+            await user.save();
 
             await Log.create({
               action: "medicine_upload_success",
               user: req.user.id,
               details: {
                 medicineId: medicine._id,
+                donationId: donation._id,
                 name,
                 batchNo,
                 image: imageUrl,
@@ -1610,7 +1696,11 @@ app.post(
               },
             });
 
-            res.json({ message: "Medicine uploaded successfully", medicine });
+            res.json({
+              message: "Medicine and donation recorded successfully",
+              medicine,
+              donation,
+            });
           }
         );
 
@@ -1629,16 +1719,44 @@ app.post(
           storageConditions,
           isPrescription,
           image: null,
+          type,
         });
         await medicine.save();
+
+        const donation = new Donation({
+          donor: req.user.id,
+          donorType: user.userType === "hospital" ? "Hospital" : "User",
+          medicine: medicine._id,
+          quantity,
+          type,
+          trackingId: generateTrackingId(),
+          value: parseFloat(quantity) * 10, // Example value calculation
+          impact: parseInt(quantity) * 2, // Example impact calculation
+          recipientName: "Pending Assignment",
+          status: "pending",
+        });
+        await donation.save();
+
+        user.donationHistory.push(donation._id);
+        await user.save();
 
         await Log.create({
           action: "medicine_upload_success",
           user: req.user.id,
-          details: { medicineId: medicine._id, name, batchNo, image: null },
+          details: {
+            medicineId: medicine._id,
+            donationId: donation._id,
+            name,
+            batchNo,
+            image: null,
+          },
         });
 
-        res.json({ message: "Medicine uploaded successfully", medicine });
+        res.json({
+          message: "Medicine and donation recorded successfully",
+          medicine,
+          donation,
+        });
       }
     } catch (error) {
       console.error("Medicine Upload Error:", {
