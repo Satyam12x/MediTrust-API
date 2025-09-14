@@ -10,9 +10,9 @@ const helmet = require("helmet");
 const sanitize = require("sanitize-html");
 const cloudinary = require("cloudinary").v2;
 const multer = require("multer");
-const { CloudinaryStorage } = require("multer-storage-cloudinary");
+const { Readable } = require("stream");
 
-console.log("Sunil is coding!!")
+console.log("Sunil is coding!!");
 
 dotenv.config();
 
@@ -40,19 +40,13 @@ cloudinary.config({
   api_key: CLOUDINARY_API_KEY,
   api_secret: CLOUDINARY_API_SECRET,
 });
-
-// Multer configuration for Cloudinary
-const storage = new CloudinaryStorage({
-  cloudinary: cloudinary,
-  params: {
-    folder: "meditrust_profiles",
-    allowed_formats: ["jpg", "jpeg", "png"],
-    resource_type: "image",
-    upload_preset: "meditrust_profile",
-    public_id: (req, file) =>
-      `profile_${req.user?.id || Date.now()}_${Date.now()}`,
-  },
+console.log("Cloudinary Config:", {
+  cloud_name: cloudinary.config().cloud_name,
+  api_key: cloudinary.config().api_key,
 });
+
+// Multer configuration
+const storage = multer.memoryStorage();
 const upload = multer({
   storage,
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
@@ -853,13 +847,17 @@ app.post(
   upload.single("profilePicture"),
   async (req, res) => {
     try {
-      // Log request details
       console.log("Upload profile picture request received:", {
         userId: req.user.id,
-        file: req.file,
+        file: req.file
+          ? {
+              originalname: req.file.originalname,
+              mimetype: req.file.mimetype,
+              size: req.file.size,
+            }
+          : "No file",
       });
 
-      // Validate file presence
       if (!req.file) {
         await Log.create({
           action: "profile_picture_upload_failed",
@@ -869,7 +867,6 @@ app.post(
         return res.status(400).json({ error: "Please upload an image file" });
       }
 
-      // Validate user
       const user = await User.findById(req.user.id);
       if (!user) {
         await Log.create({
@@ -880,31 +877,70 @@ app.post(
         return res.status(404).json({ error: "User not found" });
       }
 
-      // Log Cloudinary response
-      console.log("Cloudinary upload response:", {
-        url: req.file.path,
-        publicId: req.file.filename,
-      });
-
-      // Update user profile picture
-      user.profilePicture = req.file.path; // Cloudinary URL
-      await user.save();
-
-      // Log success
-      await Log.create({
-        action: "profile_picture_upload_success",
-        user: user._id,
-        details: {
-          email: user.email,
-          profilePicture: req.file.path,
-          cloudinaryPublicId: req.file.filename,
+      // Upload to Cloudinary without preset (signed upload)
+      const uploadStream = cloudinary.uploader.upload_stream(
+        {
+          folder: "meditrust_profiles",
+          public_id: `profile_${req.user.id}_${Date.now()}`,
+          resource_type: "image",
         },
-      });
+        async (error, result) => {
+          if (error) {
+            console.error("Cloudinary Upload Error:", {
+              message: error.message,
+              stack: error.stack,
+            });
+            await Log.create({
+              action: "profile_picture_upload_error",
+              user: req.user.id,
+              details: { error: error.message, stack: error.stack },
+            });
+            return res.status(500).json({
+              error: "Failed to upload image to Cloudinary",
+              details: error.message,
+            });
+          }
 
-      res.json({
-        message: "Profile picture uploaded successfully",
-        profilePicture: req.file.path,
-      });
+          console.log("Cloudinary upload response:", {
+            url: result.secure_url,
+            publicId: result.public_id,
+          });
+
+          // Delete previous profile picture if it exists
+          if (user.profilePicture) {
+            const publicId = user.profilePicture.split("/").pop().split(".")[0];
+            try {
+              await cloudinary.uploader.destroy(
+                `meditrust_profiles/${publicId}`
+              );
+              console.log("Deleted previous profile picture:", { publicId });
+            } catch (deleteError) {
+              console.warn("Failed to delete previous profile picture:", {
+                message: deleteError.message,
+                stack: deleteError.stack,
+              });
+            }
+          }
+
+          user.profilePicture = result.secure_url;
+          await user.save();
+
+          await Log.create({
+            action: "profile_picture_upload_success",
+            user: user._id,
+            details: { url: result.secure_url, publicId: result.public_id },
+          });
+
+          res.json({
+            message: "Profile picture uploaded successfully",
+            profilePicture: result.secure_url,
+          });
+        }
+      );
+
+      // Stream the file buffer to Cloudinary
+      const stream = Readable.from(req.file.buffer);
+      stream.pipe(uploadStream);
     } catch (error) {
       console.error("Profile Picture Upload Error:", {
         message: error.message,
@@ -1463,7 +1499,13 @@ app.post(
 
       console.log("Medicine upload request received:", {
         userId: req.user.id,
-        file: req.file,
+        file: req.file
+          ? {
+              originalname: req.file.originalname,
+              mimetype: req.file.mimetype,
+              size: req.file.size,
+            }
+          : "No file",
         body: req.body,
       });
 
@@ -1512,35 +1554,97 @@ app.post(
       // Upload image to Cloudinary if provided
       let imageUrl = null;
       if (req.file) {
-        console.log("Medicine image Cloudinary response:", {
-          url: req.file.path,
-          publicId: req.file.filename,
+        const uploadStream = cloudinary.uploader.upload_stream(
+          {
+            folder: "meditrust_medicines",
+            public_id: `medicine_${req.user.id}_${batchNo}_${Date.now()}`,
+            resource_type: "image",
+          },
+          async (error, result) => {
+            if (error) {
+              console.error("Cloudinary Upload Error (Medicine):", {
+                message: error.message,
+                stack: error.stack,
+              });
+              await Log.create({
+                action: "medicine_upload_error",
+                user: req.user.id,
+                details: { error: error.message, stack: error.stack },
+              });
+              return res.status(500).json({
+                error: "Failed to upload medicine image to Cloudinary",
+                details: error.message,
+              });
+            }
+
+            console.log("Cloudinary medicine upload response:", {
+              url: result.secure_url,
+              publicId: result.public_id,
+            });
+
+            imageUrl = result.secure_url;
+
+            const medicine = new Medicine({
+              name,
+              batchNo,
+              expiryDate,
+              quantity,
+              donor: req.user.id,
+              donorType: user.userType === "hospital" ? "Hospital" : "User",
+              hospital: user.userType === "hospital" ? req.user.id : null,
+              storageConditions,
+              isPrescription,
+              image: imageUrl,
+            });
+            await medicine.save();
+
+            await Log.create({
+              action: "medicine_upload_success",
+              user: req.user.id,
+              details: {
+                medicineId: medicine._id,
+                name,
+                batchNo,
+                image: imageUrl,
+                publicId: result.public_id,
+              },
+            });
+
+            res.json({ message: "Medicine uploaded successfully", medicine });
+          }
+        );
+
+        // Stream the file buffer to Cloudinary
+        const stream = Readable.from(req.file.buffer);
+        stream.pipe(uploadStream);
+      } else {
+        const medicine = new Medicine({
+          name,
+          batchNo,
+          expiryDate,
+          quantity,
+          donor: req.user.id,
+          donorType: user.userType === "hospital" ? "Hospital" : "User",
+          hospital: user.userType === "hospital" ? req.user.id : null,
+          storageConditions,
+          isPrescription,
+          image: null,
         });
-        imageUrl = req.file.path; // Cloudinary URL
+        await medicine.save();
+
+        await Log.create({
+          action: "medicine_upload_success",
+          user: req.user.id,
+          details: { medicineId: medicine._id, name, batchNo, image: null },
+        });
+
+        res.json({ message: "Medicine uploaded successfully", medicine });
       }
-
-      const medicine = new Medicine({
-        name,
-        batchNo,
-        expiryDate,
-        quantity,
-        donor: req.user.id,
-        donorType: user.userType === "hospital" ? "Hospital" : "User",
-        hospital: user.userType === "hospital" ? req.user.id : null,
-        storageConditions,
-        isPrescription,
-        image: imageUrl,
-      });
-      await medicine.save();
-
-      await Log.create({
-        action: "medicine_upload_success",
-        user: req.user.id,
-        details: { medicineId: medicine._id, name, batchNo, image: imageUrl },
-      });
-      res.json({ message: "Medicine uploaded successfully", medicine });
     } catch (error) {
-      console.error("Medicine Upload Error:", error);
+      console.error("Medicine Upload Error:", {
+        message: error.message,
+        stack: error.stack,
+      });
       await Log.create({
         action: "medicine_upload_error",
         user: req.user.id,
@@ -1596,7 +1700,13 @@ app.post(
       const { documentType } = req.body;
       console.log("KYC upload request received:", {
         userId: req.user.id,
-        file: req.file,
+        file: req.file
+          ? {
+              originalname: req.file.originalname,
+              mimetype: req.file.mimetype,
+              size: req.file.size,
+            }
+          : "No file",
         documentType,
       });
 
@@ -1621,28 +1731,66 @@ app.post(
         return res.status(404).json({ error: "User not found" });
       }
 
-      console.log("KYC document Cloudinary response:", {
-        url: req.file.path,
-        publicId: req.file.filename,
-      });
+      // Upload to Cloudinary without preset
+      const uploadStream = cloudinary.uploader.upload_stream(
+        {
+          folder: "meditrust_kyc",
+          public_id: `kyc_${req.user.id}_${documentType}_${Date.now()}`,
+          resource_type: "image",
+        },
+        async (error, result) => {
+          if (error) {
+            console.error("Cloudinary Upload Error (KYC):", {
+              message: error.message,
+              stack: error.stack,
+            });
+            await Log.create({
+              action: "kyc_upload_error",
+              user: req.user.id,
+              details: { error: error.message, stack: error.stack },
+            });
+            return res.status(500).json({
+              error: "Failed to upload KYC document to Cloudinary",
+              details: error.message,
+            });
+          }
 
-      user.kycDocuments.push({
-        documentType,
-        url: req.file.path,
-        verified: false,
-      });
-      await user.save();
+          console.log("Cloudinary KYC upload response:", {
+            url: result.secure_url,
+            publicId: result.public_id,
+          });
 
-      await Log.create({
-        action: "kyc_upload_success",
-        user: user._id,
-        details: { documentType, documentUrl: req.file.path },
-      });
-      res.json({
-        message: "KYC document uploaded successfully, pending verification",
-      });
+          user.kycDocuments.push({
+            documentType,
+            url: result.secure_url,
+            verified: false,
+          });
+          await user.save();
+
+          await Log.create({
+            action: "kyc_upload_success",
+            user: user._id,
+            details: {
+              documentType,
+              documentUrl: result.secure_url,
+              publicId: result.public_id,
+            },
+          });
+
+          res.json({
+            message: "KYC document uploaded successfully, pending verification",
+          });
+        }
+      );
+
+      // Stream the file buffer to Cloudinary
+      const stream = Readable.from(req.file.buffer);
+      stream.pipe(uploadStream);
     } catch (error) {
-      console.error("KYC Upload Error:", error);
+      console.error("KYC Upload Error:", {
+        message: error.message,
+        stack: error.stack,
+      });
       await Log.create({
         action: "kyc_upload_error",
         user: req.user.id,
@@ -1693,24 +1841,89 @@ app.get(
   }
 );
 
-// Test Cloudinary Route (Temporary for Debugging)
-app.get("/api/test-cloudinary", async (req, res) => {
-  try {
-    const result = await cloudinary.uploader.upload(
-      "https://via.placeholder.com/150",
-      {
-        folder: "meditrust_profiles",
-        upload_preset: "meditrust_profile",
-        resource_type: "image",
+// Test Cloudinary Route
+app.post(
+  "/api/test-cloudinary",
+  upload.single("testImage"),
+  async (req, res) => {
+    try {
+      console.log("Test Cloudinary request received:", {
+        file: req.file
+          ? {
+              originalname: req.file.originalname,
+              mimetype: req.file.mimetype,
+              size: req.file.size,
+            }
+          : "No file",
+      });
+
+      if (!req.file) {
+        return res.status(400).json({ error: "Please upload a test image" });
       }
-    );
-    res.json({ message: "Cloudinary test successful", url: result.secure_url });
-  } catch (error) {
-    console.error("Cloudinary Test Error:", error);
-    res
-      .status(500)
-      .json({ error: "Cloudinary test failed", details: error.message });
+
+      const uploadStream = cloudinary.uploader.upload_stream(
+        {
+          folder: "meditrust_profiles",
+          public_id: `test_${Date.now()}`,
+          resource_type: "image",
+        },
+        (error, result) => {
+          if (error) {
+            console.error("Cloudinary Test Error:", {
+              message: error.message,
+              stack: error.stack,
+            });
+            return res.status(500).json({
+              error: "Cloudinary test failed",
+              details: error.message,
+            });
+          }
+          console.log("Cloudinary test upload response:", {
+            url: result.secure_url,
+            publicId: result.public_id,
+          });
+          res.json({
+            message: "Cloudinary test successful",
+            url: result.secure_url,
+            publicId: result.public_id,
+          });
+        }
+      );
+
+      const stream = Readable.from(req.file.buffer);
+      stream.pipe(uploadStream);
+    } catch (error) {
+      console.error("Cloudinary Test Error:", {
+        message: error.message,
+        stack: error.stack,
+      });
+      res.status(500).json({ error: "Server error", details: error.message });
+    }
   }
+);
+
+// Global Error Handler
+app.use((err, req, res, next) => {
+  console.error("Global Error Handler:", {
+    message: err.message,
+    stack: err.stack,
+    path: req.path,
+    method: req.method,
+  });
+  Log.create({
+    action: "global_error",
+    user: req.user ? req.user.id : null,
+    details: {
+      error: err.message,
+      stack: err.stack,
+      path: req.path,
+      method: req.method,
+    },
+  });
+  res.status(500).json({
+    error: "Internal server error",
+    details: err.message || "Unknown error",
+  });
 });
 
 // Start server
