@@ -27,16 +27,30 @@ const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY;
 const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET;
 
 // Cloudinary configuration
-if (CLOUDINARY_CLOUD_NAME && CLOUDINARY_API_KEY && CLOUDINARY_API_SECRET) {
-  cloudinary.config({
-    cloud_name: CLOUDINARY_CLOUD_NAME,
-    api_key: CLOUDINARY_API_KEY,
-    api_secret: CLOUDINARY_API_SECRET,
-  });
+if (!CLOUDINARY_CLOUD_NAME || !CLOUDINARY_API_KEY || !CLOUDINARY_API_SECRET) {
+  console.error(
+    "Cloudinary configuration missing. Please set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET in .env"
+  );
+  process.exit(1);
 }
+cloudinary.config({
+  cloud_name: CLOUDINARY_CLOUD_NAME,
+  api_key: CLOUDINARY_API_KEY,
+  api_secret: CLOUDINARY_API_SECRET,
+});
 
-// Multer configuration for file uploads
-const storage = multer.memoryStorage();
+// Multer configuration for Cloudinary
+const storage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  params: {
+    folder: "meditrust_profiles",
+    allowed_formats: ["jpg", "jpeg", "png"],
+    resource_type: "image",
+    upload_preset: "meditrust_profile",
+    public_id: (req, file) =>
+      `profile_${req.user?.id || Date.now()}_${Date.now()}`,
+  },
+});
 const upload = multer({
   storage,
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
@@ -54,7 +68,10 @@ const upload = multer({
 mongoose
   .connect(MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
   .then(() => console.log("MongoDB Connected"))
-  .catch((err) => console.error("MongoDB Connection Error:", err));
+  .catch((err) => {
+    console.error("MongoDB Connection Error:", err);
+    process.exit(1);
+  });
 
 // User Schema
 const userSchema = new mongoose.Schema(
@@ -276,10 +293,22 @@ const sendEmail = async (to, subject, text) => {
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers["authorization"];
   const token = authHeader && authHeader.split(" ")[1];
-  if (!token) return res.status(401).json({ error: "Access denied" });
+  if (!token) {
+    Log.create({
+      action: "access_denied",
+      details: { reason: "No token provided" },
+    });
+    return res.status(401).json({ error: "Access denied" });
+  }
 
   jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ error: "Invalid token" });
+    if (err) {
+      Log.create({
+        action: "access_denied",
+        details: { reason: "Invalid token", error: err.message },
+      });
+      return res.status(403).json({ error: "Invalid token" });
+    }
     req.user = user;
     next();
   });
@@ -306,7 +335,7 @@ const ensureOtpVerified = async (req, res, next) => {
       user: req.user.id,
       details: { error: error.message },
     });
-    res.status(500).json({ error: "Server error" });
+    res.status(500).json({ error: "Server error", details: error.message });
   }
 };
 
@@ -413,7 +442,7 @@ app.post("/api/signup", sanitizeBody, async (req, res) => {
     console.error("Signup Error:", error);
     await Log.create({
       action: "signup_error",
-      details: { error: error.message },
+      details: { error: error.message, stack: error.stack },
     });
     res.status(500).json({ error: "Server error", details: error.message });
   }
@@ -559,7 +588,7 @@ app.post("/api/complete-registration", sanitizeBody, async (req, res) => {
     console.error("Complete Registration Error:", error);
     await Log.create({
       action: "complete_registration_error",
-      details: { error: error.message },
+      details: { error: error.message, stack: error.stack },
     });
     res.status(500).json({ error: "Server error", details: error.message });
   }
@@ -635,7 +664,7 @@ app.post("/api/login", sanitizeBody, async (req, res) => {
     console.error("Login Error:", error);
     await Log.create({
       action: "login_error",
-      details: { error: error.message },
+      details: { error: error.message, stack: error.stack },
     });
     res.status(500).json({ error: "Server error", details: error.message });
   }
@@ -688,7 +717,7 @@ app.post("/api/forgot-password", sanitizeBody, async (req, res) => {
     console.error("Forgot Password Error:", error);
     await Log.create({
       action: "forgot_password_error",
-      details: { error: error.message },
+      details: { error: error.message, stack: error.stack },
     });
     res.status(500).json({ error: "Server error", details: error.message });
   }
@@ -758,7 +787,7 @@ app.post("/api/reset-password", sanitizeBody, async (req, res) => {
     console.error("Reset Password Error:", error);
     await Log.create({
       action: "reset_password_error",
-      details: { error: error.message },
+      details: { error: error.message, stack: error.stack },
     });
     res.status(500).json({ error: "Server error", details: error.message });
   }
@@ -808,7 +837,7 @@ app.get("/api/user/profile", authenticateToken, async (req, res) => {
     await Log.create({
       action: "profile_fetch_error",
       user: req.user.id,
-      details: { error: error.message },
+      details: { error: error.message, stack: error.stack },
     });
     res.status(500).json({ error: "Server error", details: error.message });
   }
@@ -823,7 +852,7 @@ app.post(
   async (req, res) => {
     try {
       // Log request details
-      console.log("Upload request received:", {
+      console.log("Upload profile picture request received:", {
         userId: req.user.id,
         file: req.file,
       });
@@ -849,30 +878,14 @@ app.post(
         return res.status(404).json({ error: "User not found" });
       }
 
-      // Upload to Cloudinary
-      const result = await new Promise((resolve, reject) => {
-        const stream = cloudinary.uploader.upload_stream(
-          {
-            folder: "meditrust_profiles",
-            upload_preset: "meditrust_profile",
-            resource_type: "image",
-          },
-          (error, result) => {
-            if (error) reject(error);
-            else resolve(result);
-          }
-        );
-        stream.end(req.file.buffer);
-      });
-
       // Log Cloudinary response
       console.log("Cloudinary upload response:", {
-        url: result.secure_url,
-        publicId: result.public_id,
+        url: req.file.path,
+        publicId: req.file.filename,
       });
 
       // Update user profile picture
-      user.profilePicture = result.secure_url;
+      user.profilePicture = req.file.path; // Cloudinary URL
       await user.save();
 
       // Log success
@@ -881,14 +894,14 @@ app.post(
         user: user._id,
         details: {
           email: user.email,
-          profilePicture: result.secure_url,
-          cloudinaryPublicId: result.public_id,
+          profilePicture: req.file.path,
+          cloudinaryPublicId: req.file.filename,
         },
       });
 
       res.json({
         message: "Profile picture uploaded successfully",
-        profilePicture: result.secure_url,
+        profilePicture: req.file.path,
       });
     } catch (error) {
       console.error("Profile Picture Upload Error:", {
@@ -982,7 +995,7 @@ app.post(
       await Log.create({
         action: "password_update_error",
         user: req.user.id,
-        details: { error: error.message },
+        details: { error: error.message, stack: error.stack },
       });
       res.status(500).json({ error: "Server error", details: error.message });
     }
@@ -1075,9 +1088,9 @@ app.post(
       await Log.create({
         action: "email_update_error",
         user: req.user.id,
-        details: { error: error.message },
+        details: { error: error.message, stack: error.stack },
       });
-      res.status(500).json({ error: "Server error" });
+      res.status(500).json({ error: "Server error", details: error.message });
     }
   }
 );
@@ -1142,9 +1155,9 @@ app.post(
       await Log.create({
         action: "email_update_error",
         user: req.user.id,
-        details: { error: error.message },
+        details: { error: error.message, stack: error.stack },
       });
-      res.status(500).json({ error: "Server error" });
+      res.status(500).json({ error: "Server error", details: error.message });
     }
   }
 );
@@ -1193,9 +1206,9 @@ app.post(
       await Log.create({
         action: "phone_update_error",
         user: req.user.id,
-        details: { error: error.message },
+        details: { error: error.message, stack: error.stack },
       });
-      res.status(500).json({ error: "Server error" });
+      res.status(500).json({ error: "Server error", details: error.message });
     }
   }
 );
@@ -1289,9 +1302,9 @@ app.get(
       await Log.create({
         action: "stats_fetch_error",
         user: req.user.id,
-        details: { error: error.message },
+        details: { error: error.message, stack: error.stack },
       });
-      res.status(500).json({ error: "Server error" });
+      res.status(500).json({ error: "Server error", details: error.message });
     }
   }
 );
@@ -1320,9 +1333,9 @@ app.get(
       await Log.create({
         action: "requests_fetch_error",
         user: req.user.id,
-        details: { error: error.message },
+        details: { error: error.message, stack: error.stack },
       });
-      res.status(500).json({ error: "Server error" });
+      res.status(500).json({ error: "Server error", details: error.message });
     }
   }
 );
@@ -1358,9 +1371,9 @@ app.get(
       await Log.create({
         action: "donations_fetch_error",
         user: req.user.id,
-        details: { error: error.message },
+        details: { error: error.message, stack: error.stack },
       });
-      res.status(500).json({ error: "Server error" });
+      res.status(500).json({ error: "Server error", details: error.message });
     }
   }
 );
@@ -1400,9 +1413,9 @@ app.get(
       await Log.create({
         action: "notifications_fetch_error",
         user: req.user.id,
-        details: { error: error.message },
+        details: { error: error.message, stack: error.stack },
       });
-      res.status(500).json({ error: "Server error" });
+      res.status(500).json({ error: "Server error", details: error.message });
     }
   }
 );
@@ -1422,9 +1435,9 @@ app.get("/api/medicines/available", async (req, res) => {
     console.error("Available Medicines Fetch Error:", error);
     await Log.create({
       action: "available_medicines_fetch_error",
-      details: { error: error.message },
+      details: { error: error.message, stack: error.stack },
     });
-    res.status(500).json({ error: "Server error" });
+    res.status(500).json({ error: "Server error", details: error.message });
   }
 });
 
@@ -1445,6 +1458,12 @@ app.post(
         storageConditions,
         isPrescription,
       } = req.body;
+
+      console.log("Medicine upload request received:", {
+        userId: req.user.id,
+        file: req.file,
+        body: req.body,
+      });
 
       if (!name || !batchNo || !expiryDate || !quantity) {
         await Log.create({
@@ -1491,6 +1510,10 @@ app.post(
       // Upload image to Cloudinary if provided
       let imageUrl = null;
       if (req.file) {
+        console.log("Medicine image Cloudinary response:", {
+          url: req.file.path,
+          publicId: req.file.filename,
+        });
         imageUrl = req.file.path; // Cloudinary URL
       }
 
@@ -1519,7 +1542,7 @@ app.post(
       await Log.create({
         action: "medicine_upload_error",
         user: req.user.id,
-        details: { error: error.message },
+        details: { error: error.message, stack: error.stack },
       });
       res.status(500).json({ error: "Server error", details: error.message });
     }
@@ -1552,9 +1575,9 @@ app.get(
       await Log.create({
         action: "tracking_fetch_error",
         user: req.user.id,
-        details: { error: error.message },
+        details: { error: error.message, stack: error.stack },
       });
-      res.status(500).json({ error: "Server error" });
+      res.status(500).json({ error: "Server error", details: error.message });
     }
   }
 );
@@ -1569,6 +1592,12 @@ app.post(
   async (req, res) => {
     try {
       const { documentType } = req.body;
+      console.log("KYC upload request received:", {
+        userId: req.user.id,
+        file: req.file,
+        documentType,
+      });
+
       if (!documentType || !req.file) {
         await Log.create({
           action: "kyc_upload_failed",
@@ -1590,6 +1619,11 @@ app.post(
         return res.status(404).json({ error: "User not found" });
       }
 
+      console.log("KYC document Cloudinary response:", {
+        url: req.file.path,
+        publicId: req.file.filename,
+      });
+
       user.kycDocuments.push({
         documentType,
         url: req.file.path,
@@ -1610,7 +1644,7 @@ app.post(
       await Log.create({
         action: "kyc_upload_error",
         user: req.user.id,
-        details: { error: error.message },
+        details: { error: error.message, stack: error.stack },
       });
       res.status(500).json({ error: "Server error", details: error.message });
     }
@@ -1650,12 +1684,32 @@ app.get(
       await Log.create({
         action: "certificates_fetch_error",
         user: req.user.id,
-        details: { error: error.message },
+        details: { error: error.message, stack: error.stack },
       });
-      res.status(500).json({ error: "Server error" });
+      res.status(500).json({ error: "Server error", details: error.message });
     }
   }
 );
+
+// Test Cloudinary Route (Temporary for Debugging)
+app.get("/api/test-cloudinary", async (req, res) => {
+  try {
+    const result = await cloudinary.uploader.upload(
+      "https://via.placeholder.com/150",
+      {
+        folder: "meditrust_profiles",
+        upload_preset: "meditrust_profile",
+        resource_type: "image",
+      }
+    );
+    res.json({ message: "Cloudinary test successful", url: result.secure_url });
+  } catch (error) {
+    console.error("Cloudinary Test Error:", error);
+    res
+      .status(500)
+      .json({ error: "Cloudinary test failed", details: error.message });
+  }
+});
 
 // Start server
 app.listen(PORT, () => {
